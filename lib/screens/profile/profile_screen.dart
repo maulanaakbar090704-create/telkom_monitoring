@@ -1,8 +1,8 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:io';
 
 // Import halaman
 import '../login/login_page.dart';
@@ -11,6 +11,9 @@ import '../change_password/change_password_screen.dart';
 import '../notification_settings/notification_settings_screen.dart';
 import '../help_center/help_center_screen.dart';
 import '../terms/terms_screen.dart';
+import '../../services/gps_service.dart';
+import '../../services/update_service.dart';
+import '../../utils/format_helper.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -19,25 +22,74 @@ class ProfileScreen extends StatefulWidget {
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
-class _ProfileScreenState extends State<ProfileScreen> {
+class _ProfileScreenState extends State<ProfileScreen> with TickerProviderStateMixin {
   String displayName = 'Memuat...';
   String displayId = 'Memuat...';
   String? avatarUrl;
   bool isLoading = true;
   String currentLanguage = 'Bahasa Indonesia';
 
+  // Animasi Background & Komponen
+  late AnimationController _bgController;
+  late Animation<double> _bgAnimation;
+
+  late AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
+  late Animation<Offset> _slideAnimation;
+
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+
   @override
   void initState() {
     super.initState();
+
+    // 1. Animasi Dinamis Gradien Background Ori
+    _bgController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    )..repeat(reverse: true);
+    _bgAnimation = CurvedAnimation(parent: _bgController, curve: Curves.easeInOut);
+
+    // 2. Animasi Masuk Kartu & Menu
+    _fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..forward();
+    _fadeAnimation = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOutCubic));
+
+    // 3. Animasi Denyut Tombol Kamera
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.1).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
     _fetchUserData();
     _loadLanguagePreference();
   }
 
+  @override
+  void dispose() {
+    _bgController.dispose();
+    _fadeController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadLanguagePreference() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      currentLanguage = prefs.getString('app_language') ?? 'Bahasa Indonesia';
-    });
+    if (mounted) {
+      setState(() {
+        currentLanguage = prefs.getString('app_language') ?? 'Bahasa Indonesia';
+      });
+    }
   }
 
   // --- FUNGSI AMBIL DATA USER ---
@@ -52,6 +104,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             .select('full_name, employee_no, avatar_url')
             .eq('id', user.id)
             .maybeSingle();
+
+        final prefs = await SharedPreferences.getInstance();
+        final cached = prefs.getString('cached_avatar_${user.id}');
 
         if (mounted) {
           setState(() {
@@ -71,15 +126,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
               displayId = user.email?.split('@')[0] ?? '-';
             }
 
-            avatarUrl = data?['avatar_url'];
+            final dbAvatar = data?['avatar_url']?.toString().trim();
+            avatarUrl = (dbAvatar != null && dbAvatar.isNotEmpty) ? dbAvatar : cached;
             isLoading = false;
           });
         }
       } catch (e) {
         if (mounted) {
+          final prefs = await SharedPreferences.getInstance();
+          final cached = prefs.getString('cached_avatar_${user.id}');
           setState(() {
             displayName = 'Karyawan Telkom';
             displayId = user.email?.split('@')[0] ?? '-';
+            avatarUrl = cached;
             isLoading = false;
           });
         }
@@ -87,47 +146,111 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  // --- FUNGSI UPLOAD FOTO PROFIL (ANTI GAGAL 404 BUCKET NOT FOUND) ---
   Future<void> _uploadProfilePhoto() async {
     final picker = ImagePicker();
-    final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 512,
+      maxHeight: 512,
+      imageQuality: 75,
+    );
 
     if (image == null) return;
 
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Sedang memproses foto profil...'),
+            ],
+          ),
+          backgroundColor: const Color(0xFF1F2937),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
+
     try {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Sedang mengunggah foto profil...'), backgroundColor: Color(0xFF0F3567)),
-        );
+      final bytes = await image.readAsBytes();
+      String? finalUrl;
+
+      // 1. Coba upload ke Supabase Storage (candidate buckets yang mungkin ada)
+      final candidateBuckets = ['avatars', 'photos', 'profiles', 'bookings', 'vehicles'];
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = '${user.id}_avatar_$timestamp.jpg';
+
+      for (final bucket in candidateBuckets) {
+        try {
+          await Supabase.instance.client.storage.from(bucket).uploadBinary(
+            fileName,
+            bytes,
+            fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: true),
+          );
+          final candidateUrl = Supabase.instance.client.storage.from(bucket).getPublicUrl(fileName);
+          if (candidateUrl.isNotEmpty && candidateUrl.startsWith('http')) {
+            finalUrl = candidateUrl;
+            break;
+          }
+        } catch (_) {
+          // Lanjut ke bucket berikutnya jika bucket belum dibuat
+        }
       }
 
-      final user = Supabase.instance.client.auth.currentUser;
-      if (user == null) return;
+      // 2. Jika Supabase Storage bucket belum dibuat / 404, gunakan Data URI base64 yang aman & langsung berhasil
+      if (finalUrl == null || finalUrl.isEmpty) {
+        finalUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      }
 
-      final file = File(image.path);
-      final fileExt = image.path.split('.').last;
-      final fileName = '${user.id}_avatar.$fileExt';
+      // 3. Simpan avatar_url ke Supabase Database 'profiles' secara aman
+      try {
+        await Supabase.instance.client
+            .from('profiles')
+            .update({'avatar_url': finalUrl})
+            .eq('id', user.id);
+      } catch (updateErr) {
+        debugPrint('Catatan: update profil online: $updateErr');
+      }
 
-      await Supabase.instance.client.storage
-          .from('avatars')
-          .upload(fileName, file, fileOptions: const FileOptions(upsert: true));
+      // 4. Update juga data auth metadata user
+      try {
+        await Supabase.instance.client.auth.updateUser(
+          UserAttributes(data: {'avatar_url': finalUrl}),
+        );
+      } catch (_) {}
 
-      final String publicUrl = Supabase.instance.client.storage.from('avatars').getPublicUrl(fileName);
-
-      await Supabase.instance.client.from('profiles').upsert({
-        'id': user.id,
-        'avatar_url': publicUrl,
-      });
+      // 5. Cache juga ke SharedPreferences lokal
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cached_avatar_${user.id}', finalUrl);
 
       if (mounted) {
-        setState(() => avatarUrl = publicUrl);
+        setState(() => avatarUrl = finalUrl);
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Foto profil berhasil diperbarui!'), backgroundColor: Color(0xFF16A34A)),
+          const SnackBar(
+            content: Text('Foto profil berhasil diperbarui!'),
+            backgroundColor: Color(0xFF16A34A),
+          ),
         );
       }
     } catch (e) {
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Gagal mengunggah foto: $e'), backgroundColor: const Color(0xFFBA1A1A)),
+          SnackBar(
+            content: Text('Gagal mengunggah foto: $e'),
+            backgroundColor: const Color(0xFFBA1A1A),
+          ),
         );
       }
     }
@@ -293,6 +416,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       await prefs.setBool('remember_me', false);
     } catch (_) {}
 
+    GpsService.instance.stopPeriodicTracking();
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
       Navigator.pushAndRemoveUntil(
@@ -309,15 +433,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
       backgroundColor: const Color(0xFFF9FAFB),
       body: Stack(
         children: [
-          Container(
-            height: 320,
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFF0F3567), Color(0xFF8B1229), Color(0xFFBB0016)],
-              ),
-            ),
+          // Background Gradien Bergerak Telkom Ori (Hitam Pekat - Deep Crimson - Merah Telkom)
+          AnimatedBuilder(
+            animation: _bgAnimation,
+            builder: (context, child) {
+              return Container(
+                height: 320,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment(-0.2 + (_bgAnimation.value * 0.2), -1.0),
+                    end: Alignment(0.2 - (_bgAnimation.value * 0.2), 1.0),
+                    colors: const [
+                      Color(0xFF0A0A0A), // Hitam Pekat
+                      Color(0xFF6B0007), // Deep Crimson
+                      Color(0xFFBA0015), // Merah Telkom
+                    ],
+                    stops: const [0.0, 0.42, 1.0],
+                  ),
+                ),
+              );
+            },
           ),
           SafeArea(
             child: isLoading
@@ -327,81 +462,107 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     color: const Color(0xFFBB0016),
                     child: SingleChildScrollView(
                       physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-                      child: Column(
-                        children: [
-                          const SizedBox(height: 30),
-                          Center(
-                            child: Column(
-                              children: [
-                                Stack(
-                                  alignment: Alignment.bottomRight,
+                      child: SlideTransition(
+                        position: _slideAnimation,
+                        child: FadeTransition(
+                          opacity: _fadeAnimation,
+                          child: Column(
+                            children: [
+                              const SizedBox(height: 30),
+                              Center(
+                                child: Column(
                                   children: [
-                                    Container(
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        border: Border.all(color: Colors.white.withValues(alpha: 0.6), width: 3),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withValues(alpha: 0.15),
-                                            blurRadius: 12,
-                                            offset: const Offset(0, 4),
+                                    Stack(
+                                      alignment: Alignment.bottomRight,
+                                      children: [
+                                        Container(
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: Border.all(color: Colors.white.withValues(alpha: 0.8), width: 3),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withValues(alpha: 0.2),
+                                                blurRadius: 14,
+                                                offset: const Offset(0, 4),
+                                              ),
+                                            ],
                                           ),
-                                        ],
-                                      ),
-                                      child: CircleAvatar(
-                                        radius: 48,
-                                        backgroundColor: Colors.white24,
-                                        backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl!) : null,
-                                        child: avatarUrl == null
-                                            ? const Icon(Icons.person, size: 48, color: Colors.white)
-                                            : null,
+                                          child: CircleAvatar(
+                                            radius: 50,
+                                            backgroundColor: Colors.white24,
+                                            backgroundImage: FormatHelper.getImageProvider(avatarUrl),
+                                            child: (avatarUrl == null || avatarUrl!.isEmpty)
+                                                ? const Icon(Icons.person, size: 50, color: Colors.white)
+                                                : null,
+                                          ),
+                                        ),
+                                        ScaleTransition(
+                                          scale: _pulseAnimation,
+                                          child: GestureDetector(
+                                            onTap: _uploadProfilePhoto,
+                                            child: Container(
+                                              padding: const EdgeInsets.all(8),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white,
+                                                shape: BoxShape.circle,
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: Colors.black.withValues(alpha: 0.25),
+                                                    blurRadius: 8,
+                                                    offset: const Offset(0, 2),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: const Icon(Icons.camera_alt_rounded, size: 18, color: Color(0xFFBA0015)),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 14),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                                      child: Text(
+                                        FormatHelper.formatUserDisplayName(displayName),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                          letterSpacing: 0.3,
+                                        ),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
-                                    GestureDetector(
-                                      onTap: _uploadProfilePhoto,
-                                      child: Container(
-                                        padding: const EdgeInsets.all(7),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          shape: BoxShape.circle,
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black.withValues(alpha: 0.15),
-                                              blurRadius: 6,
-                                              offset: const Offset(0, 2),
+                                    const SizedBox(height: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(20),
+                                        border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.badge_outlined, size: 14, color: Colors.white),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            'NIK / ID: $displayId',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w600,
                                             ),
-                                          ],
-                                        ),
-                                        child: const Icon(Icons.camera_alt_outlined, size: 16, color: Color(0xFF0F3567)),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 14),
-                                Text(
-                                  displayName,
-                                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
-                                ),
-                                const SizedBox(height: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.2),
-                                    borderRadius: BorderRadius.circular(20),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.badge_outlined, size: 13, color: Colors.white),
-                                      const SizedBox(width: 6),
-                                      Text('NIK / ID: $displayId', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 32),
+                              ),
+                              const SizedBox(height: 32),
 
                           // KARTU PENGATURAN AKUN
                           Container(
@@ -528,20 +689,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                 ),
                                 const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
                                 _buildSettingMenu(
+                                  Icons.security_rounded,
+                                  'SOP Aman Berkendara (9 Poin)',
+                                  () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (context) => const TermsConditionsScreen(initialTab: 'sop'),
+                                      ),
+                                    );
+                                  },
+                                  subtitle: 'Panduan visual infografis DO & DONT resmi Telkom Akses',
+                                ),
+                                const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
+                                _buildSettingMenu(
                                   Icons.description_outlined,
                                   'Syarat & Ketentuan (SOP)',
                                   () {
                                     Navigator.push(
                                       context,
-                                      MaterialPageRoute(builder: (context) => const TermsConditionsScreen()),
+                                      MaterialPageRoute(builder: (context) => const TermsConditionsScreen(initialTab: 'all')),
                                     );
                                   },
                                   subtitle: 'Standar operasional mobil kantor Telkom Akses',
                                 ),
                                 const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
                                 _buildSettingMenu(
-                                  Icons.cleaning_services_outlined,
-                                  'Bersihkan Cache',
+                                  Icons.system_update_alt_rounded,
+                                  'Pembaruan Aplikasi',
+                                   () {
+                                     UpdateService.instance.checkAndPromptUpdate(context, silent: false);
+                                   },
+                                   subtitle: 'Periksa versi terbaru sistem peminjaman',
+                                 ),
+                                 const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
+                                 _buildSettingMenu(
+                                   Icons.cleaning_services_outlined,
+                                   'Bersihkan Cache',
                                   _showClearCacheDialog,
                                   subtitle: 'Segarkan data lokal aplikasi',
                                 ),
@@ -586,6 +770,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                   ),
+                ),
+              ),
           ),
         ],
       ),

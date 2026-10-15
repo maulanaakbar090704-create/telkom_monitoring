@@ -43,6 +43,24 @@ class _HelpCenterScreenState extends State<HelpCenterScreen> {
           'Tidak diperbolehkan. Segala pertanggungjawaban penggunaan kendaraan tercatat atas nama peminjam yang tertera pada sistem. Jika staf lain memerlukan kendaraan, silakan selesaikan pengembalian terlebih dahulu lalu buat pengajuan baru.',
       'category': 'Aturan',
     },
+    {
+      'question': 'Mengapa GPS wajib selalu aktif selama peminjaman?',
+      'answer':
+          'Sesuai SOP Telkom Akses, aplikasi memantau pergerakan armada dinas secara langsung untuk memastikan keselamatan pengemudi, kepatuhan rute dinas, dan kesiapan pertolongan darurat. Jika GPS mati di perjalanan, aplikasi akan membatasi akses hingga GPS dinyalakan kembali.',
+      'category': 'GPS & SOP',
+    },
+    {
+      'question': 'Apa yang terjadi jika aplikasi mendeteksi Fake GPS / Mock Location?',
+      'answer':
+          'Aplikasi dilengkapi proteksi anti-mock otomatis. Jika terdeteksi Fake GPS, proses pengajuan reservasi atau pengembalian armada akan seketika diblokir oleh sistem, dan insiden otomatis tercatat sebagai pelanggaran SOP kedinasan. Segera nonaktifkan aplikasi Fake GPS pada pengaturan smartphone Anda.',
+      'category': 'GPS & SOP',
+    },
+    {
+      'question': 'Apakah GPS tetap melacak lokasi setelah mobil dikembalikan?',
+      'answer':
+          'Tidak. Pemantauan lokasi otomatis berhenti total begitu proses pengembalian selesai di loker pintar. Privasi karyawan tetap terjaga di luar penugasan dinas.',
+      'category': 'Privasi',
+    },
   ];
 
   Future<void> _launchContact(String urlScheme) async {
@@ -84,7 +102,7 @@ class _HelpCenterScreenState extends State<HelpCenterScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0F3567),
+        backgroundColor: const Color(0xFF0A0A0A),
         elevation: 0,
         centerTitle: true,
         leading: IconButton(
@@ -107,7 +125,11 @@ class _HelpCenterScreenState extends State<HelpCenterScreen> {
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
-                  colors: [Color(0xFF0F3567), Color(0xFFBB0016)],
+                  colors: [
+                    Color(0xFF0A0A0A), // Hitam Pekat
+                    Color(0xFF6B0007), // Deep Crimson
+                    Color(0xFFBA0015), // Merah Telkom
+                  ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
@@ -319,7 +341,7 @@ class _HelpCenterScreenState extends State<HelpCenterScreen> {
                         const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
                         _buildContactTile(
                           icon: Icons.phone_in_talk_outlined,
-                          iconColor: const Color(0xFF0F3567),
+                          iconColor: const Color(0xFFBA0015),
                           title: 'Hotline Darurat Operasional',
                           subtitle: 'Panggilan darurat kendala mobil 24/7',
                           onTap: () => _launchContact('tel:08001234567'),

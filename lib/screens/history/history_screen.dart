@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../return/return_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../utils/format_helper.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -13,6 +14,9 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
+  late AnimationController _bgController;
+  late Animation<double> _bgAnimation;
+
   List<Map<String, dynamic>> _historyList = [];
   bool _isLoading = true;
   String? _errorMessage;
@@ -24,6 +28,12 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
   @override
   void initState() {
     super.initState();
+    _bgController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    )..repeat(reverse: true);
+    _bgAnimation = CurvedAnimation(parent: _bgController, curve: Curves.easeInOut);
+
     _pulseController = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat(reverse: true);
     _pulseAnimation = Tween<double>(begin: 0.3, end: 1.0).animate(_pulseController);
     _loadHistoryData();
@@ -31,6 +41,7 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
 
   @override
   void dispose() {
+    _bgController.dispose();
     _pulseController.dispose();
     _searchController.dispose();
     super.dispose();
@@ -192,7 +203,7 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
                               children: [
                                 const Text('Kode Loker Kunci Pintar:', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF1E40AF))),
                                 const SizedBox(height: 2),
-                                Text(qrCode.toString(), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF1E3A8A), letterSpacing: 1.0)),
+                                Text(FormatHelper.formatLockerCodeForDisplay(qrCode), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF1E3A8A), letterSpacing: 1.0)),
                               ],
                             ),
                           ),
@@ -222,7 +233,7 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
                             ],
                           ),
                           const SizedBox(height: 4),
-                          Text(adminNote.toString(), style: const TextStyle(fontSize: 12, color: Color(0xFF78350F), height: 1.4)),
+                          Text(FormatHelper.sanitizeNoteForDisplay(adminNote), style: const TextStyle(fontSize: 12, color: Color(0xFF78350F), height: 1.4)),
                         ],
                       ),
                     ),
@@ -285,7 +296,7 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 18, color: const Color(0xFF0F3567)),
+        Icon(icon, size: 18, color: const Color(0xFFBA0015)),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -347,16 +358,27 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
         backgroundColor: const Color(0xFFF9FAFB),
         body: Stack(
           children: [
-            Container(
-              height: 250,
-              width: double.infinity,
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFF0F3567), Color(0xFF8B1229), Color(0xFFBB0016)],
-                ),
-              ),
+            // Background Gradien Bergerak Telkom Ori (Hitam Pekat - Deep Crimson - Merah Telkom)
+            AnimatedBuilder(
+              animation: _bgAnimation,
+              builder: (context, child) {
+                return Container(
+                  height: 250,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment(-0.2 + (_bgAnimation.value * 0.2), -1.0),
+                      end: Alignment(0.2 - (_bgAnimation.value * 0.2), 1.0),
+                      colors: const [
+                        Color(0xFF0A0A0A), // Hitam Pekat
+                        Color(0xFF6B0007), // Deep Crimson
+                        Color(0xFFBA0015), // Merah Telkom
+                      ],
+                      stops: const [0.0, 0.42, 1.0],
+                    ),
+                  ),
+                );
+              },
             ),
             SafeArea(
               bottom: false,
@@ -895,7 +917,7 @@ class _HistoryScreenState extends State<HistoryScreen> with TickerProviderStateM
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        adminNote,
+                        FormatHelper.sanitizeNoteForDisplay(adminNote),
                         style: const TextStyle(fontSize: 11, color: Color(0xFF92400E)),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,

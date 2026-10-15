@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:image_picker/image_picker.dart'; 
+import 'package:image_picker/image_picker.dart';
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 import 'package:mobile_scanner/mobile_scanner.dart'; 
+import '../../services/gps_service.dart'; 
+import '../../utils/format_helper.dart'; 
 
 class BookingScreen extends StatefulWidget {
   final String carName;
@@ -22,7 +24,7 @@ class BookingScreen extends StatefulWidget {
 
 class _BookingScreenState extends State<BookingScreen> {
   static const Color primaryRed = Color(0xFFBB0016);
-  static const Color navyBlue = Color(0xFF0F3567);
+  static const Color navyBlue = Color(0xFF0A0A0A);
   static const Color darkText = Color(0xFF0F172A);
   static const Color mutedText = Color(0xFF64748B);
   static const Color borderColor = Color(0xFFE2E8F0);
@@ -249,6 +251,9 @@ class _BookingScreenState extends State<BookingScreen> {
           if (inCenterOval) {
             centerPixelsCount++;
             if (isSkin) skinPixelsInCenter++;
+          }
+
+          if (x >= width * 0.35 && x <= width * 0.65) {
             centralRowLuminance[y] += yVal;
             centralRowCounts[y]++;
           }
@@ -256,13 +261,13 @@ class _BookingScreenState extends State<BookingScreen> {
       }
 
       final avgLuminance = totalLuminance / totalPixels;
-      if (avgLuminance < 30) {
+      if (avgLuminance < 35) {
         return const FaceVerificationResult(
           isValid: false,
           message: 'Foto terlalu gelap. Gunakan pencahayaan yang cukup agar wajah terlihat jelas.',
         );
       }
-      if (avgLuminance > 240) {
+      if (avgLuminance > 230) {
         return const FaceVerificationResult(
           isValid: false,
           message: 'Foto terlalu silau. Pastikan wajah tidak tertutup cahaya berlebih.',
@@ -271,31 +276,27 @@ class _BookingScreenState extends State<BookingScreen> {
 
       final skinRatioInCenter = centerPixelsCount > 0 ? (skinPixelsInCenter / centerPixelsCount) : 0.0;
 
-      int validRows = 0;
-      double rowVarianceSum = 0;
-      double lastRowAvg = -1;
-      final startY = (height * 0.3).toInt();
-      final endY = (height * 0.7).toInt();
-      for (int y = startY; y < endY; y++) {
-        if (centralRowCounts[y] > 0) {
-          final rowAvg = centralRowLuminance[y] / centralRowCounts[y];
-          if (lastRowAvg >= 0) {
-            rowVarianceSum += (rowAvg - lastRowAvg).abs();
-            validRows++;
-          }
-          lastRowAvg = rowAvg;
+      double maxVerticalGradient = 0;
+      for (int y = (height * 0.25).toInt(); y < (height * 0.75).toInt() - 2; y++) {
+        final lum1 = centralRowCounts[y] > 0 ? centralRowLuminance[y] / centralRowCounts[y] : 0;
+        final lum2 = centralRowCounts[y + 2] > 0 ? centralRowLuminance[y + 2] / centralRowCounts[y + 2] : 0;
+        final grad = (lum1 - lum2).abs().toDouble();
+        if (grad > maxVerticalGradient) {
+          maxVerticalGradient = grad;
         }
       }
-      final avgRowVariance = validRows > 0 ? (rowVarianceSum / validRows) : 0.0;
 
-      if (skinRatioInCenter < 0.20) {
+      final bool hasSufficientFeatures = maxVerticalGradient >= 8.0;
+      final bool hasSufficientFaceColor = skinRatioInCenter >= 0.10;
+
+      if (!hasSufficientFaceColor && skinRatioInCenter < 0.06) {
         return const FaceVerificationResult(
           isValid: false,
           message: 'Wajah tidak terdeteksi! Pastikan wajah Anda terlihat jelas, menghadap kamera, dan berada di tengah area.',
         );
       }
 
-      if (avgRowVariance < 1.0) {
+      if (!hasSufficientFeatures && skinRatioInCenter < 0.15) {
         return const FaceVerificationResult(
           isValid: false,
           message: 'Objek tidak teridentifikasi sebagai wajah. Arahkan kamera langsung ke wajah Anda.',
@@ -304,23 +305,25 @@ class _BookingScreenState extends State<BookingScreen> {
 
       return const FaceVerificationResult(
         isValid: true,
-        message: 'Wajah berhasil diverifikasi!',
+        message: 'Foto wajah berhasil diverifikasi!',
       );
     } catch (_) {
       return const FaceVerificationResult(
         isValid: true,
-        message: 'Wajah berhasil diverifikasi.',
+        message: 'Foto wajah berhasil disimpan!',
       );
     }
   }
 
-  Future<void> _takeFaceScan() async {
+  Future<void> _pickFaceImage(ImageSource source) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
       final XFile? photo = await _picker.pickImage(
-        source: ImageSource.camera,
-        preferredCameraDevice: CameraDevice.front, 
-        imageQuality: 85, 
+        source: source,
+        preferredCameraDevice: CameraDevice.front,
+        imageQuality: 85,
+        maxWidth: 1024,
+        maxHeight: 1024,
       );
 
       if (photo == null) return;
@@ -370,10 +373,96 @@ class _BookingScreenState extends State<BookingScreen> {
           _isFaceVerifying = false;
         });
         messenger.showSnackBar(
-          SnackBar(content: Text('Gagal membuka kamera: $e'), backgroundColor: primaryRed),
+          SnackBar(
+            content: Text('Gagal mengambil/memuat foto wajah: $e'),
+            backgroundColor: primaryRed,
+          ),
         );
       }
     }
+  }
+
+  void _showFaceSourcePickerModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  'Verifikasi / Upload Foto Wajah',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: darkText,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Pilih metode pengambilan foto wajah peminjam:',
+                  style: TextStyle(fontSize: 12, color: mutedText),
+                ),
+                const SizedBox(height: 20),
+                ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: navyBlue.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.camera_front_rounded, color: navyBlue, size: 24),
+                  ),
+                  title: const Text('Ambil Selfie (Kamera Depan)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  subtitle: const Text('Verifikasi langsung menggunakan kamera HP', style: TextStyle(fontSize: 12, color: mutedText)),
+                  trailing: const Icon(Icons.chevron_right, color: mutedText),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickFaceImage(ImageSource.camera);
+                  },
+                ),
+                const Divider(height: 16),
+                ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: primaryRed.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.photo_library_outlined, color: primaryRed, size: 24),
+                  ),
+                  title: const Text('Unggah dari Galeri', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  subtitle: const Text('Pilih foto wajah yang tersimpan di perangkat', style: TextStyle(fontSize: 12, color: mutedText)),
+                  trailing: const Icon(Icons.chevron_right, color: mutedText),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickFaceImage(ImageSource.gallery);
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _takeOdoScan() async {
@@ -440,7 +529,7 @@ class _BookingScreenState extends State<BookingScreen> {
 
     if (result != null && mounted) {
       setState(() {
-        _scannedQrCode = result.toString();
+        _scannedQrCode = FormatHelper.formatLockerCodeForDisplay(result.toString());
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('QR Loker berhasil dipindai!'), backgroundColor: Colors.green),
@@ -687,7 +776,7 @@ class _BookingScreenState extends State<BookingScreen> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [primaryRed, navyBlue],
+            colors: [Color(0xFF0A0A0A), Color(0xFF6B0007), primaryRed],
           ),
         ),
         child: SafeArea(
@@ -710,7 +799,7 @@ class _BookingScreenState extends State<BookingScreen> {
                       const SizedBox(height: 16),
                       _buildOdometerCard(),
                       const SizedBox(height: 16),
-                      _buildFaceVerificationCard(), 
+                      _buildFaceVerificationCard(),
                       const SizedBox(height: 16),
                       _buildQrVerificationCard(),
                       
@@ -919,6 +1008,8 @@ class _BookingScreenState extends State<BookingScreen> {
     );
   }
 
+
+
   Widget _buildFaceVerificationCard() {
     final bool hasFace = _scannedFaceBytes != null && _isFaceVerified;
 
@@ -934,9 +1025,9 @@ class _BookingScreenState extends State<BookingScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Verifikasi Wajah', style: TextStyle(color: darkText, fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text('Verifikasi Wajah / Upload Foto', style: TextStyle(color: darkText, fontSize: 16, fontWeight: FontWeight.bold)),
                     SizedBox(height: 4),
-                    Text('Pastikan wajah terlihat jelas di kamera', style: TextStyle(color: mutedText, fontSize: 12)),
+                    Text('Wajib lampirkan selfie / foto wajah peminjam kendaraan', style: TextStyle(color: mutedText, fontSize: 12)),
                   ],
                 ),
               ),
@@ -944,94 +1035,98 @@ class _BookingScreenState extends State<BookingScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          Container(
-            width: double.infinity,
-            height: 200,
-            decoration: BoxDecoration(
-              color: hasFace ? const Color(0xFFECFDF5) : softBlue,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: hasFace ? const Color(0xFFA7F3D0) : const Color(0xFFD5E2F0)),
-            ),
-            child: _isFaceVerifying
-                ? const Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: navyBlue),
-                      SizedBox(height: 14),
-                      Text(
-                        'Memverifikasi deteksi wajah...',
-                        style: TextStyle(color: darkText, fontSize: 13, fontWeight: FontWeight.bold),
-                      ),
-                      SizedBox(height: 4),
-                      Text(
-                        'Memeriksa pencahayaan dan kontur wajah',
-                        style: TextStyle(color: mutedText, fontSize: 11),
-                      ),
-                    ],
-                  )
-                : Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      hasFace
-                          ? Center(
-                              child: Container(
-                                width: 142,
-                                height: 142,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  border: Border.all(color: Colors.green.withValues(alpha: 0.8), width: 3),
-                                  image: DecorationImage(
-                                    image: MemoryImage(_scannedFaceBytes!),
-                                    fit: BoxFit.cover,
-                                  ),
-                                ),
-                              ),
-                            )
-                          : Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Container(
-                                  width: 116,
+          InkWell(
+            onTap: _isFaceVerifying ? null : _showFaceSourcePickerModal,
+            borderRadius: BorderRadius.circular(16),
+            child: Container(
+              width: double.infinity,
+              height: 200,
+              decoration: BoxDecoration(
+                color: hasFace ? const Color(0xFFECFDF5) : softBlue,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: hasFace ? const Color(0xFFA7F3D0) : const Color(0xFFD5E2F0)),
+              ),
+              child: _isFaceVerifying
+                  ? const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircularProgressIndicator(color: navyBlue),
+                        SizedBox(height: 14),
+                        Text(
+                          'Memverifikasi deteksi wajah...',
+                          style: TextStyle(color: darkText, fontSize: 13, fontWeight: FontWeight.bold),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'Memeriksa pencahayaan dan kontur wajah',
+                          style: TextStyle(color: mutedText, fontSize: 11),
+                        ),
+                      ],
+                    )
+                  : Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        hasFace
+                            ? Center(
+                                child: Container(
+                                  width: 142,
                                   height: 142,
                                   decoration: BoxDecoration(
-                                    border: Border.all(color: navyBlue.withValues(alpha: 0.55), width: 3),
-                                    borderRadius: BorderRadius.circular(60),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.green.withValues(alpha: 0.8), width: 3),
+                                    image: DecorationImage(
+                                      image: MemoryImage(_scannedFaceBytes!),
+                                      fit: BoxFit.cover,
+                                    ),
                                   ),
                                 ),
-                              ],
+                              )
+                            : Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Container(
+                                    width: 116,
+                                    height: 142,
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: navyBlue.withValues(alpha: 0.55), width: 3),
+                                      borderRadius: BorderRadius.circular(60),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                        if (!hasFace) const Icon(Icons.person_outline, color: navyBlue, size: 70),
+                        if (!hasFace)
+                          const Positioned(
+                            bottom: 28,
+                            child: Text(
+                              'Posisikan wajah di dalam area',
+                              style: TextStyle(color: darkText, fontSize: 13, fontWeight: FontWeight.bold),
                             ),
-                      if (!hasFace) const Icon(Icons.person_outline, color: navyBlue, size: 70),
-                      if (!hasFace)
-                        const Positioned(
-                          bottom: 28,
+                          ),
+                        Positioned(
+                          bottom: 10,
                           child: Text(
-                            'Posisikan wajah di dalam area',
-                            style: TextStyle(color: darkText, fontSize: 13, fontWeight: FontWeight.bold),
+                            hasFace ? 'Wajah Terverifikasi Valid (Ketuk untuk ganti)' : 'Ketuk untuk foto selfie atau upload foto wajah',
+                            style: TextStyle(
+                              color: hasFace ? Colors.green[700] : mutedText,
+                              fontSize: 11,
+                              fontWeight: hasFace ? FontWeight.bold : FontWeight.normal,
+                            ),
                           ),
                         ),
-                      Positioned(
-                        bottom: 10,
-                        child: Text(
-                          hasFace ? 'Wajah Terverifikasi Valid' : 'Gunakan pencahayaan yang cukup',
-                          style: TextStyle(
-                            color: hasFace ? Colors.green[700] : mutedText,
-                            fontSize: 11,
-                            fontWeight: hasFace ? FontWeight.bold : FontWeight.normal,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+            ),
           ),
           const SizedBox(height: 14),
           SizedBox(
             width: double.infinity,
             height: 50,
             child: ElevatedButton.icon(
-              onPressed: _isFaceVerifying ? null : _takeFaceScan,
+              onPressed: _isFaceVerifying ? null : _showFaceSourcePickerModal,
               icon: Icon(hasFace ? Icons.refresh : Icons.camera_alt_outlined),
               label: Text(
-                hasFace ? 'Scan Ulang Wajah' : 'Scan Wajah',
+                hasFace ? 'Foto Ulang / Ganti Foto Wajah' : 'Ambil Selfie / Upload Foto Wajah',
                 style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
               ),
               style: ElevatedButton.styleFrom(
@@ -1082,7 +1177,7 @@ class _BookingScreenState extends State<BookingScreen> {
                 children: [
                   const Text('Kode Loker Tersimpan:', style: TextStyle(color: Color(0xFF065F46), fontSize: 11)),
                   const SizedBox(height: 4),
-                  Text(_scannedQrCode!, style: const TextStyle(color: Color(0xFF047857), fontSize: 14, fontWeight: FontWeight.bold)),
+                  Text(FormatHelper.formatLockerCodeForDisplay(_scannedQrCode), style: const TextStyle(color: Color(0xFF047857), fontSize: 14, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
@@ -1214,7 +1309,7 @@ class _BookingScreenState extends State<BookingScreen> {
       } else if (_scannedOdoBytes == null) {
         errorMessage = 'Harap ambil foto odometer / speedometer kendaraan!';
       } else if (_scannedFaceBytes == null || !_isFaceVerified) {
-        errorMessage = 'Harap lakukan verifikasi wajah sampai berhasil!';
+        errorMessage = 'Harap lakukan verifikasi wajah atau upload foto wajah!';
       } else if (_scannedQrCode == null) {
         errorMessage = 'Harap scan QR loker kunci!';
       } else {
@@ -1312,13 +1407,70 @@ class _BookingScreenState extends State<BookingScreen> {
   Future<void> _submitBookingToSupabase() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error: User tidak ditemukan.'), backgroundColor: primaryRed));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error: User tidak ditemukan.'), backgroundColor: primaryRed),
+      );
       return;
     }
+
+    // 1. Validasi Keamanan GPS & Anti-Fake GPS
+    final gpsStatus = await GpsService.instance.checkGpsSecurity();
+    if (gpsStatus == GpsSecurityStatus.mockDetected) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('KEAMANAN: Terdeteksi Fake GPS / Mock Location! Matikan aplikasi lokasi palsu untuk melanjutkan.'),
+            backgroundColor: primaryRed,
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+    if (gpsStatus != GpsSecurityStatus.ready) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Layanan GPS wajib aktif dan diizinkan sebelum mengajukan peminjaman kendaraan!'),
+            backgroundColor: primaryRed,
+          ),
+        );
+      }
+      return;
+    }
+
+    // 2. Anti-Double Booking: Cegah user meminjam 2 mobil sekaligus
+    try {
+      final existingBookings = await Supabase.instance.client
+          .from('bookings')
+          .select('id, status')
+          .eq('employee_id', user.id)
+          .inFilter('status', ['active', 'pending', 'pending_admin'])
+          .limit(1);
+
+      if (existingBookings.isNotEmpty) {
+        final existingStatus = existingBookings.first['status'];
+        final statusMsg = existingStatus == 'active'
+            ? 'Anda masih memiliki peminjaman kendaraan yang SEDANG AKTIF.'
+            : 'Pengajuan peminjaman Anda sebelumnya masih MENUNGGU PERSETUJUAN.';
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Pengajuan Ditolak: $statusMsg Selesaikan peminjaman sebelumnya terlebih dahulu.'),
+              backgroundColor: primaryRed,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    } catch (_) {}
 
     setState(() {
       _isSubmitting = true;
     });
+
+    if (!mounted) return;
 
     // Tampilkan loading dialog selama proses unggah & simpan
     showDialog(
@@ -1368,6 +1520,30 @@ class _BookingScreenState extends State<BookingScreen> {
       final vehicleId = vehicleRes['id'];
       final picName = vehicleRes['pic_name']?.toString() ?? 'PIC Kendaraan';
 
+      // 3. Cek Ketersediaan Kendaraan Realtime (Mencegah Race Condition)
+      try {
+        final conflictRes = await Supabase.instance.client
+            .from('bookings')
+            .select('id')
+            .eq('vehicle_id', vehicleId)
+            .eq('status', 'active')
+            .limit(1);
+
+        if (conflictRes.isNotEmpty) {
+          if (mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Kendaraan ini baru saja dipinjam oleh karyawan lain. Silakan pilih armada yang tersedia.'),
+                backgroundColor: primaryRed,
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
+          return;
+        }
+      } catch (_) {}
+
       DateTime? bookingDateTime;
       if (_selectedDate != null && _selectedTime != null) {
         bookingDateTime = DateTime(
@@ -1403,7 +1579,7 @@ class _BookingScreenState extends State<BookingScreen> {
       }
 
       final kmText = _odoKmController.text.trim();
-      final adminNoteContent = '[KM Awal: $kmText km | Foto Odo: ${odoPhotoUrl ?? "-"}]';
+      final adminNoteContent = '[KM Awal: $kmText km | Foto Odo: ${odoPhotoUrl != null ? "Terlampir" : "-"} | Foto Wajah: ${facePhotoUrl != null ? "Terlampir" : "-"}]';
 
       final Map<String, dynamic> bookingData = {
         'employee_id': user.id,
@@ -1416,9 +1592,14 @@ class _BookingScreenState extends State<BookingScreen> {
         'qr_locker_code': _scannedQrCode,
         'face_photo_path': facePhotoUrl,
         'admin_note': adminNoteContent,
+        'latitude': null,
+        'longitude': null,
+        'kecepatan': null,
+        'jarak': null,
+        'sinyal': 0,
       };
 
-      // Coba masukkan dengan kolom tambahan jika user telah menambahkan odo_photo_path dan start_odometer
+      // Masukkan data booking ke Supabase
       try {
         final extendedData = Map<String, dynamic>.from(bookingData);
         final kmNum = num.tryParse(kmText);
@@ -1426,12 +1607,18 @@ class _BookingScreenState extends State<BookingScreen> {
         if (odoPhotoUrl != null) extendedData['odo_photo_path'] = odoPhotoUrl;
         await Supabase.instance.client.from('bookings').insert(extendedData);
       } catch (_) {
-        // Fallback jika kolom start_odometer / odo_photo_path belum ada di tabel bookings Supabase
         try {
           await Supabase.instance.client.from('bookings').insert(bookingData);
         } catch (_) {
-          final fallbackData = Map<String, dynamic>.from(bookingData)..remove('plat_nomor');
-          await Supabase.instance.client.from('bookings').insert(fallbackData);
+          try {
+            final fallbackData = Map<String, dynamic>.from(bookingData)..remove('plat_nomor');
+            await Supabase.instance.client.from('bookings').insert(fallbackData);
+          } catch (_) {
+            final minimalData = Map<String, dynamic>.from(bookingData)
+              ..remove('plat_nomor')
+              ..remove('face_photo_path');
+            await Supabase.instance.client.from('bookings').insert(minimalData);
+          }
         }
       }
 
@@ -1545,7 +1732,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Scan QR Loker Kunci', style: TextStyle(color: Colors.white, fontSize: 16)),
-        backgroundColor: const Color(0xFF0F3567),
+        backgroundColor: const Color(0xFF0A0A0A),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: MobileScanner(

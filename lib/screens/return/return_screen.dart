@@ -4,6 +4,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:typed_data';
 import '../booking/booking_screen.dart';
+import '../../services/gps_service.dart';
+import '../../utils/format_helper.dart';
 
 class ReturnScreen extends StatefulWidget {
   final String? bookingId;
@@ -235,10 +237,10 @@ class _ReturnScreenState extends State<ReturnScreen> {
 
     if (result != null && mounted) {
       setState(() {
-        _scannedReturnQrCode = result.toString();
+        _scannedReturnQrCode = FormatHelper.formatLockerCodeForDisplay(result.toString());
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('QR Loker berhasil dipindai: $_scannedReturnQrCode'), backgroundColor: Colors.green),
+        const SnackBar(content: Text('QR Loker berhasil dipindai!'), backgroundColor: Colors.green),
       );
     }
   }
@@ -353,7 +355,7 @@ class _ReturnScreenState extends State<ReturnScreen> {
       return;
     }
 
-    // 2. Validasi KM Akhir
+    // 2. Validasi KM Akhir & Integritas Nilai Odometer
     final kmText = _kmAkhirController.text.trim();
     if (kmText.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -363,6 +365,34 @@ class _ReturnScreenState extends State<ReturnScreen> {
         ),
       );
       return;
+    }
+
+    final finalKmNum = num.tryParse(kmText);
+    if (finalKmNum == null || finalKmNum < 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Angka KM odometer tidak valid! Harap masukkan angka yang benar.'),
+          backgroundColor: primaryRed,
+        ),
+      );
+      return;
+    }
+
+    final initialKmStr = _getInitialKm();
+    if (initialKmStr != null) {
+      final initialKmNum = num.tryParse(initialKmStr);
+      if (initialKmNum != null && finalKmNum < initialKmNum) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Validasi Odometer Gagal: KM akhir ($finalKmNum km) tidak boleh lebih kecil dari KM awal ($initialKmNum km)!',
+            ),
+            backgroundColor: primaryRed,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+        return;
+      }
     }
 
     // 3. Validasi Foto Odometer
@@ -389,6 +419,21 @@ class _ReturnScreenState extends State<ReturnScreen> {
 
     if (activeBooking == null) return;
 
+    // 5. Validasi Keamanan GPS & Anti-Fake GPS
+    final gpsStatus = await GpsService.instance.checkGpsSecurity();
+    if (!mounted) return;
+
+    if (gpsStatus == GpsSecurityStatus.mockDetected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('KEAMANAN: Terdeteksi Fake GPS / Mock Location! Nonaktifkan lokasi tiruan untuk menyelesaikan pengembalian.'),
+          backgroundColor: primaryRed,
+          duration: Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
     try {
@@ -408,13 +453,16 @@ class _ReturnScreenState extends State<ReturnScreen> {
       }
 
       final existingNote = activeBooking!['admin_note']?.toString() ?? '';
-      final returnNote = '[KM Akhir: $kmText km | Foto Return Odo: ${returnOdoUrl ?? "-"} | Loker Return: $_scannedReturnQrCode]';
+      final cleanLocker = FormatHelper.formatLockerCodeForDisplay(_scannedReturnQrCode);
+      final returnNote = '[KM Akhir: $kmText km | Foto Return Odo: ${returnOdoUrl != null ? "Terlampir" : "-"} | Loker Return: $cleanLocker]';
       final updatedAdminNote = existingNote.isEmpty ? returnNote : '$existingNote\n$returnNote';
 
       final Map<String, dynamic> updateData = {
         'status': 'completed',
         'returned_at': DateTime.now().toIso8601String(),
         'admin_note': updatedAdminNote,
+        'kecepatan': 0.0,
+        'sinyal': 0, // Titik koordinat / sinyal mati
       };
 
       final kmNum = num.tryParse(kmText);
@@ -441,6 +489,9 @@ class _ReturnScreenState extends State<ReturnScreen> {
               .eq('id', vehicleId);
         } catch (_) {}
       }
+
+      // Hentikan pelacakan GPS periodik 5 detik ke Supabase
+      GpsService.instance.stopPeriodicTracking();
 
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -478,7 +529,7 @@ class _ReturnScreenState extends State<ReturnScreen> {
                 const Text('Pengembalian Berhasil!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
                 const SizedBox(height: 8),
                 Text(
-                  'Kunci telah dikembalikan ke loker ${_scannedReturnQrCode ?? "-"}.\nLoker telah terkunci dan status kendaraan telah diperbarui menjadi selesai.',
+                  'Kunci telah dikembalikan ke loker ${FormatHelper.formatLockerCodeForDisplay(_scannedReturnQrCode)}.\nStatus peminjaman kini berstatus Selesai dan penguncian GPS telah dinonaktifkan.',
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280), height: 1.4),
                 ),
@@ -1076,7 +1127,7 @@ class _ReturnScreenState extends State<ReturnScreen> {
                       children: [
                         const Text('Pintu Loker Terbuka', style: TextStyle(color: Color(0xFF065F46), fontSize: 13, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 2),
-                        Text('Kode Loker: $_scannedReturnQrCode', style: const TextStyle(color: Color(0xFF047857), fontSize: 12)),
+                        Text('Kode Loker: ${FormatHelper.formatLockerCodeForDisplay(_scannedReturnQrCode)}', style: const TextStyle(color: Color(0xFF047857), fontSize: 12)),
                         const SizedBox(height: 2),
                         const Text('Silakan masukkan kunci kendaraan ke dalam loker.', style: TextStyle(color: Color(0xFF047857), fontSize: 11)),
                       ],

@@ -5,6 +5,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:async';
 import '../home/home_screen.dart';
+import '../change_password/change_password_screen.dart';
+import '../../utils/security_manager.dart';
+import '../../services/update_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -63,6 +66,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _successController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
     _successScaleAnimation = Tween<double>(begin: 0.0, end: 1.0)
         .animate(CurvedAnimation(parent: _successController, curve: Curves.elasticOut));
+
+    // Periksa pembaruan aplikasi secara otomatis (silent)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.instance.checkAndPromptUpdate(context, silent: true);
+    });
   }
 
   @override
@@ -98,175 +106,306 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   // DIALOG BANTUAN LUPA KATA SANDI (SUPER ADMIN)
   // ==========================================
   void _showForgotPasswordDialog() {
-    final currentId = _emailController.text.trim();
+    final initialId = _emailController.text.trim();
+    final nikController = TextEditingController(text: initialId);
+    bool isSubmitting = false;
+    bool requestSent = false;
+    String? statusMessage;
+
     showDialog(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
-          title: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFEF2F2),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: const Color(0xFFFEE2E2), width: 1.5),
-                ),
-                child: const Icon(
-                  Icons.admin_panel_settings_rounded,
-                  color: Color(0xFFBB0016),
-                  size: 26,
-                ),
+        return StatefulBuilder(
+          builder: (builderContext, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFEF2F2),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: const Color(0xFFFEE2E2), width: 1.5),
+                    ),
+                    child: const Icon(
+                      Icons.admin_panel_settings_rounded,
+                      color: Color(0xFFBB0016),
+                      size: 26,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Lupa Kata Sandi?',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF111827)),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Bantuan Super Admin IT Fleet',
+                          style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 14),
-              const Expanded(
+              content: SingleChildScrollView(
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Lupa Kata Sandi?',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF111827)),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Untuk keamanan akun internal Telkom Akses, reset kata sandi divalidasi oleh Super Admin IT Fleet.',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF4B5563), height: 1.4),
                     ),
-                    SizedBox(height: 2),
-                    Text(
-                      'Bantuan Super Admin IT',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                    const SizedBox(height: 16),
+
+                    // Input NIK
+                    const Text(
+                      'NIK / ID Karyawan',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF374151)),
                     ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 8),
-              const Text(
-                'Demi keamanan akun internal Telkom Akses, reset kata sandi dikonfirmasi langsung oleh Super Admin IT Fleet.',
-                style: TextStyle(fontSize: 13, color: Color(0xFF4B5563), height: 1.4),
-              ),
-              const SizedBox(height: 16),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF9FAFB),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.badge_outlined, size: 20, color: Color(0xFFBB0016)),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'ID Karyawan yang diajukan:',
-                            style: TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: nikController,
+                      keyboardType: TextInputType.text,
+                      decoration: InputDecoration(
+                        hintText: 'Contoh: 123456 atau NIK Anda',
+                        hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                        prefixIcon: const Icon(Icons.badge_outlined, size: 20, color: Color(0xFFBB0016)),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: Color(0xFFBB0016), width: 1.5),
+                        ),
+                        filled: true,
+                        fillColor: const Color(0xFFF9FAFB),
+                      ),
+                    ),
+
+                    if (statusMessage != null) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: requestSent ? const Color(0xFFECFDF5) : const Color(0xFFFEF2F2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: requestSent ? const Color(0xFFA7F3D0) : const Color(0xFFFECACA),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            currentId.isNotEmpty ? currentId : '(Belum diisi di formulir login)',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: currentId.isNotEmpty ? const Color(0xFF111827) : const Color(0xFF9CA3AF),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              requestSent ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+                              color: requestSent ? const Color(0xFF059669) : const Color(0xFFDC2626),
+                              size: 18,
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                statusMessage!,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: requestSent ? const Color(0xFF065F46) : const Color(0xFF991B1B),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(height: 14),
+
+                    // Tombol Ajukan Reset ke Database/Super Admin
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: ElevatedButton.icon(
+                        onPressed: isSubmitting
+                            ? null
+                            : () async {
+                                final targetNik = nikController.text.trim();
+                                if (targetNik.isEmpty) {
+                                  setDialogState(() {
+                                    statusMessage = 'Harap isi NIK / ID Karyawan Anda!';
+                                    requestSent = false;
+                                  });
+                                  return;
+                                }
+
+                                setDialogState(() {
+                                  isSubmitting = true;
+                                  statusMessage = null;
+                                });
+
+                                try {
+                                  // 1. Coba panggil RPC jika tersedia di Supabase
+                                  bool rpcSuccess = false;
+                                  try {
+                                    final res = await Supabase.instance.client.rpc(
+                                      'request_password_reset',
+                                      params: {'p_nik': targetNik},
+                                    );
+                                    if (res != null) {
+                                      rpcSuccess = true;
+                                    }
+                                  } catch (_) {
+                                    rpcSuccess = false;
+                                  }
+
+                                  if (!rpcSuccess) {
+                                    // Fallback: update langsung field reset_requested di profiles
+                                    await Supabase.instance.client
+                                        .from('profiles')
+                                        .update({
+                                          'reset_requested': true,
+                                          'reset_requested_at': DateTime.now().toIso8601String(),
+                                        })
+                                        .eq('employee_no', targetNik);
+                                  }
+
+                                  setDialogState(() {
+                                    isSubmitting = false;
+                                    requestSent = true;
+                                    statusMessage = 'Permintaan reset berhasil dikirim! Super Admin akan memproses akun Anda.';
+                                  });
+                                } catch (err) {
+                                  setDialogState(() {
+                                    isSubmitting = false;
+                                    requestSent = false;
+                                    statusMessage = 'Gagal mengajukan reset: Pastikan NIK Anda benar.';
+                                  });
+                                }
+                              },
+                        icon: isSubmitting
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              )
+                            : const Icon(Icons.send_rounded, color: Colors.white, size: 18),
+                        label: Text(
+                          isSubmitting ? 'Mengirim Permintaan...' : 'Kirim Pengajuan ke Admin',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFBB0016),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+                    const Row(
+                      children: [
+                        Expanded(child: Divider(color: Color(0xFFE5E7EB))),
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8),
+                          child: Text('ATAU HUBUNGI LANGSUNG', style: TextStyle(fontSize: 10, color: Color(0xFF9CA3AF), fontWeight: FontWeight.w600)),
+                        ),
+                        Expanded(child: Divider(color: Color(0xFFE5E7EB))),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Tombol Hubungi via WhatsApp
+                    SizedBox(
+                      width: double.infinity,
+                      height: 42,
+                      child: ElevatedButton.icon(
+                        onPressed: () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          final currentNik = nikController.text.trim();
+                          final message = 'Halo Super Admin IT Fleet Telkom Akses, saya ingin mengajukan permohonan reset kata sandi akun Sistem Monitoring Kendaraan.\n\nID Karyawan: ${currentNik.isNotEmpty ? currentNik : '-'}\nMohon bantuannya untuk reset kata sandi. Terima kasih.';
+                          final waUri = Uri.parse('https://wa.me/6281280001000?text=${Uri.encodeComponent(message)}');
+                          Navigator.pop(dialogContext);
+                          try {
+                            if (await canLaunchUrl(waUri)) {
+                              await launchUrl(waUri, mode: LaunchMode.externalApplication);
+                            } else {
+                              await launchUrl(waUri);
+                            }
+                          } catch (_) {
+                            if (mounted) {
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Gagal membuka WhatsApp. Silakan salin kontak admin.'),
+                                  backgroundColor: Color(0xFFBB0016),
+                                ),
+                              );
+                            }
+                          }
+                        },
+                        icon: const Icon(Icons.chat_bubble_outline_rounded, color: Colors.white, size: 18),
+                        label: const Text(
+                          'Hubungi via WhatsApp',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF25D366),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Tombol Salin Kontak
+                    SizedBox(
+                      width: double.infinity,
+                      height: 40,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(
+                            const ClipboardData(
+                              text: 'Super Admin IT Fleet Telkom Akses\nWhatsApp: +62 812-8000-1000\nEmail: adminfleet@telkom.co.id',
+                            ),
+                          );
+                          Navigator.pop(dialogContext);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Kontak Super Admin berhasil disalin ke clipboard!'),
+                              backgroundColor: Color(0xFF16A34A),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 16, color: Color(0xFF374151)),
+                        label: const Text(
+                          'Salin Kontak Super Admin',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF374151)),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xFFD1D5DB)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text(
-                'Silakan hubungi Super Admin melalui WhatsApp berikut untuk verifikasi identitas dan reset kata sandi:',
-                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-              ),
-              const SizedBox(height: 16),
-              // Tombol Hubungi via WhatsApp
-              SizedBox(
-                width: double.infinity,
-                height: 46,
-                child: ElevatedButton.icon(
-                  onPressed: () async {
-                    final message = 'Halo Super Admin IT Fleet Telkom Akses, saya ingin mengajukan permohonan reset kata sandi akun Sistem Monitoring Kendaraan.\n\nID Karyawan: ${currentId.isNotEmpty ? currentId : '-'}\nMohon bantuannya untuk reset kata sandi. Terima kasih.';
-                    final waUri = Uri.parse('https://wa.me/6281280001000?text=${Uri.encodeComponent(message)}');
-                    Navigator.pop(dialogContext);
-                    try {
-                      if (await canLaunchUrl(waUri)) {
-                        await launchUrl(waUri, mode: LaunchMode.externalApplication);
-                      } else {
-                        await launchUrl(waUri);
-                      }
-                    } catch (_) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Gagal membuka WhatsApp secara otomatis. Silakan salin kontak admin.'),
-                            backgroundColor: Color(0xFFBB0016),
-                          ),
-                        );
-                      }
-                    }
-                  },
-                  icon: const Icon(Icons.chat_bubble_outline_rounded, color: Colors.white, size: 20),
-                  label: const Text(
-                    'Hubungi via WhatsApp',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF25D366),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Tutup', style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.bold)),
                 ),
-              ),
-              const SizedBox(height: 10),
-              // Tombol Salin Kontak
-              SizedBox(
-                width: double.infinity,
-                height: 42,
-                child: OutlinedButton.icon(
-                  onPressed: () {
-                    Clipboard.setData(
-                      const ClipboardData(
-                        text: 'Super Admin IT Fleet Telkom Akses\nWhatsApp: +62 812-8000-1000\nEmail: adminfleet@telkom.co.id',
-                      ),
-                    );
-                    Navigator.pop(dialogContext);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Kontak Super Admin berhasil disalin ke clipboard!'),
-                        backgroundColor: Color(0xFF16A34A),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.copy_rounded, size: 18, color: Color(0xFF374151)),
-                  label: const Text(
-                    'Salin Kontak Super Admin',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF374151)),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Color(0xFFD1D5DB)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Tutup', style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.bold)),
-            ),
-          ],
+              ],
+            );
+          },
         );
       },
     );
@@ -276,7 +415,20 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   // LOGIKA LOGIN SUPABASE
   // ==========================================
   Future<void> _handleLogin() async {
-    final rawId = _emailController.text.trim();
+    // 1. Cek proteksi Brute-Force Rate Limiting
+    if (SecurityManager.instance.isLockedOut) {
+      final remaining = SecurityManager.instance.remainingLockoutSeconds;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Akses sementara dikunci karena 5x percobaan gagal. Tunggu $remaining detik.'),
+          backgroundColor: const Color(0xFFDC2626),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+    final rawId = SecurityManager.instance.sanitizeInput(_emailController.text);
     final password = _passwordController.text.trim();
 
     if (rawId.isEmpty || password.isEmpty) {
@@ -303,11 +455,12 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
       final profile = await Supabase.instance.client
           .from('profiles')
-          .select('full_name, role')
+          .select('full_name, role, must_change_password')
           .eq('id', response.user!.id)
           .maybeSingle();
 
       if (profile == null) {
+        SecurityManager.instance.recordFailedAttempt();
         if (mounted) {
           setState(() { _isLoading = false; });
           ScaffoldMessenger.of(context).showSnackBar(
@@ -324,6 +477,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       final String userRole = profile['role'] ?? 'peminjam';
       
       if (userRole == 'admin') {
+        SecurityManager.instance.recordFailedAttempt();
         await Supabase.instance.client.auth.signOut(); 
         if (mounted) {
           setState(() { _isLoading = false; });
@@ -337,6 +491,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         }
         return; 
       }
+
+      final bool mustChangePassword = profile['must_change_password'] == true;
+
+      // Reset hitungan percobaan jika login berhasil
+      SecurityManager.instance.recordSuccessfulLogin();
 
       // Simpan status Remember Me & ID Karyawan ke SharedPreferences
       try {
@@ -359,25 +518,49 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
       Timer(const Duration(milliseconds: 1500), () {
         if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (context) => const HomeScreen()), 
-          );
+          if (mustChangePassword) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (context) => const ChangePasswordScreen()),
+            );
+          } else {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (context) => const HomeScreen()), 
+            );
+          }
         }
       });
 
-    } on AuthException {
+    } on AuthException catch (ae) {
+      SecurityManager.instance.recordFailedAttempt();
+      final remainingAttempts = SecurityManager.instance.remainingAttemptsNotifier.value;
+      final attemptMsg = remainingAttempts > 0
+          ? ' (Sisa percobaan: $remainingAttempts)'
+          : ' (Akun terkunci 60 detik)';
+      final safeMsg = SecurityManager.instance.sanitizeErrorMessage(ae);
+
       if (mounted) {
         setState(() { _isLoading = false; });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Login Gagal: ID Karyawan atau kata sandi salah.'), backgroundColor: Color(0xFFBB0016)),
+          SnackBar(
+            content: Text('$safeMsg$attemptMsg'),
+            backgroundColor: const Color(0xFFBB0016),
+            duration: const Duration(seconds: 3),
+          ),
         );
       }
     } catch (e) {
+      SecurityManager.instance.recordFailedAttempt();
+      final safeMsg = SecurityManager.instance.sanitizeErrorMessage(e);
       if (mounted) {
         setState(() { _isLoading = false; });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Terjadi kesalahan: $e'), backgroundColor: const Color(0xFFBB0016)),
+          SnackBar(
+            content: Text(safeMsg),
+            backgroundColor: const Color(0xFFBB0016),
+            duration: const Duration(seconds: 3),
+          ),
         );
       }
     }
@@ -399,8 +582,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     begin: _topAlignment.value,
                     end: _bottomAlignment.value,
                     colors: const [
-                      Color(0xFFBB0016),
-                      Color(0xFF0F3567),
+                      Color(0xFF0A0A0A),
+                      Color(0xFF6B0007),
+                      Color(0xFFBA0015),
                     ],
                   ),
                 ),
@@ -501,7 +685,40 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           'Silakan Masuk',
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFF111827)),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+
+        // Banner Peringatan Lockout Brute Force
+        ValueListenableBuilder<int>(
+          valueListenable: SecurityManager.instance.remainingLockoutNotifier,
+          builder: (context, remainingSec, _) {
+            if (remainingSec <= 0) return const SizedBox.shrink();
+            return Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF2F2),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFCA5A5)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.lock_clock_rounded, color: Color(0xFFDC2626), size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Percobaan gagal 5x. Akses dikunci: $remainingSec detik',
+                      style: const TextStyle(
+                        color: Color(0xFFB91C1C),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
         
         const Text('ID Karyawan', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF374151))),
         const SizedBox(height: 8),
@@ -618,28 +835,40 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
         const SizedBox(height: 24),
 
-        SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: ElevatedButton(
-            onPressed: _isLoading ? null : _handleLogin,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFBB0016),
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              elevation: 0,
-            ),
-            child: _isLoading
-                ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
-                : const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text('Masuk', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                      SizedBox(width: 8),
-                      Icon(Icons.arrow_forward, size: 20),
-                    ],
-                  ),
-          ),
+        ValueListenableBuilder<int>(
+          valueListenable: SecurityManager.instance.remainingLockoutNotifier,
+          builder: (context, remainingSec, _) {
+            final isLocked = remainingSec > 0;
+            return SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: ElevatedButton(
+                onPressed: (_isLoading || isLocked) ? null : _handleLogin,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFBB0016),
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: const Color(0xFFD1D5DB),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  elevation: 0,
+                ),
+                child: _isLoading
+                    ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
+                    : isLocked
+                        ? Text(
+                            'Terkunci ($remainingSec dtk)',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white70),
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text('Masuk', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              SizedBox(width: 8),
+                              Icon(Icons.arrow_forward, size: 20),
+                            ],
+                          ),
+              ),
+            );
+          },
         ),
       ],
     );

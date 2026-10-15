@@ -3,10 +3,15 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/login/login_page.dart';
 import 'screens/home/home_screen.dart';
+import 'utils/gps_requirement_manager.dart';
+import 'widgets/app_requirement_guard.dart';
 
 void main() async {
   // Wajib ditambahkan sebelum inisialisasi Supabase
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Inisialisasi pendeteksi GPS Wajib
+  await GpsRequirementManager.instance.init();
 
   // Inisialisasi Supabase
   await Supabase.initialize(
@@ -39,6 +44,10 @@ class TelkomFleetApp extends StatelessWidget {
     return MaterialApp(
       title: 'Monitoring Mobil Kantor',
       debugShowCheckedModeBanner: false,
+      // Guard global: Wajib GPS Aktif
+      builder: (context, child) => AppRequirementGuard(
+        child: child ?? const SizedBox.shrink(),
+      ),
       home: initialScreen,
     );
   }

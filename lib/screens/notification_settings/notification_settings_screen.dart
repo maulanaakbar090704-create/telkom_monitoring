@@ -5,14 +5,21 @@ class NotificationSettingsScreen extends StatefulWidget {
   const NotificationSettingsScreen({super.key});
 
   @override
-  State<NotificationSettingsScreen> createState() => _NotificationSettingsScreenState();
+  State<NotificationSettingsScreen> createState() =>
+      _NotificationSettingsScreenState();
 }
 
-class _NotificationSettingsScreenState extends State<NotificationSettingsScreen> {
+class _NotificationSettingsScreenState
+    extends State<NotificationSettingsScreen> {
+  // Notifikasi Aplikasi Umum
   bool pushNotif = true;
-  bool emailNotif = true;
-  bool systemAlert = true;
   bool returnReminder = true;
+  bool systemAlert = true;
+
+
+  // Notifikasi Email Dinas
+  bool emailNotif = true;
+
   bool isLoading = true;
 
   @override
@@ -23,13 +30,17 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
 
   Future<void> _loadNotificationPreferences() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      pushNotif = prefs.getBool('notif_push') ?? true;
-      emailNotif = prefs.getBool('notif_email') ?? true;
-      systemAlert = prefs.getBool('notif_system') ?? true;
-      returnReminder = prefs.getBool('notif_return_reminder') ?? true;
-      isLoading = false;
-    });
+    if (mounted) {
+      setState(() {
+        pushNotif = prefs.getBool('notif_push') ?? true;
+        returnReminder = prefs.getBool('notif_return_reminder') ?? true;
+        systemAlert = prefs.getBool('notif_system') ?? true;
+
+
+        emailNotif = prefs.getBool('notif_email') ?? true;
+        isLoading = false;
+      });
+    }
   }
 
   Future<void> _updatePref(String key, bool value) async {
@@ -52,26 +63,30 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0F3567),
+        backgroundColor: const Color(0xFF0A0A0A),
         elevation: 0,
         title: const Text(
           'Pengaturan Notifikasi',
-          style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+          style: TextStyle(
+              color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
         ),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new,
+              color: Colors.white, size: 18),
           onPressed: () => Navigator.pop(context),
         ),
         centerTitle: true,
       ),
       body: isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFFBB0016)))
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFFBB0016)))
           : SingleChildScrollView(
               physics: const BouncingScrollPhysics(),
               padding: const EdgeInsets.all(20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // 1. NOTIFIKASI UMUM APLIKASI
                   const Text(
                     'NOTIFIKASI APLIKASI',
                     style: TextStyle(
@@ -99,14 +114,18 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                       children: [
                         SwitchListTile(
                           activeThumbColor: const Color(0xFFBB0016),
-                          activeTrackColor: const Color(0xFFBB0016).withValues(alpha: 0.3),
+                          activeTrackColor:
+                              const Color(0xFFBB0016).withValues(alpha: 0.3),
                           title: const Text(
                             'Push Notification',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF1F2937)),
+                            style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1F2937)),
                           ),
                           subtitle: const Text(
                             'Pemberitahuan persetujuan dan status armada langsung di HP',
-                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                            style: TextStyle(fontSize: 11.5, color: Colors.grey),
                           ),
                           value: pushNotif,
                           onChanged: (val) {
@@ -114,17 +133,22 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                             _updatePref('notif_push', val);
                           },
                         ),
-                        const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
+                        const Divider(
+                            height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
                         SwitchListTile(
                           activeThumbColor: const Color(0xFFBB0016),
-                          activeTrackColor: const Color(0xFFBB0016).withValues(alpha: 0.3),
+                          activeTrackColor:
+                              const Color(0xFFBB0016).withValues(alpha: 0.3),
                           title: const Text(
                             'Pengingat Pengembalian Mobil',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF1F2937)),
+                            style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1F2937)),
                           ),
                           subtitle: const Text(
                             'Alarm pengingat sebelum batas waktu peminjaman berakhir',
-                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                            style: TextStyle(fontSize: 11.5, color: Colors.grey),
                           ),
                           value: returnReminder,
                           onChanged: (val) {
@@ -132,17 +156,22 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                             _updatePref('notif_return_reminder', val);
                           },
                         ),
-                        const Divider(height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
+                        const Divider(
+                            height: 1, thickness: 1, color: Color(0xFFF3F4F6)),
                         SwitchListTile(
                           activeThumbColor: const Color(0xFFBB0016),
-                          activeTrackColor: const Color(0xFFBB0016).withValues(alpha: 0.3),
+                          activeTrackColor:
+                              const Color(0xFFBB0016).withValues(alpha: 0.3),
                           title: const Text(
-                            'Peringatan Sistem & SOP',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF1F2937)),
+                            'Peringatan Sistem & Pemeliharaan',
+                            style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1F2937)),
                           ),
                           subtitle: const Text(
-                            'Pengumuman maintenance sistem atau himbauan keamanan fleet',
-                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                            'Pengumuman maintenance sistem server atau armada pool',
+                            style: TextStyle(fontSize: 11.5, color: Colors.grey),
                           ),
                           value: systemAlert,
                           onChanged: (val) {
@@ -153,8 +182,10 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                       ],
                     ),
                   ),
+
                   const SizedBox(height: 24),
 
+                  // 3. NOTIFIKASI EMAIL DINAS
                   const Text(
                     'NOTIFIKASI EMAIL DINAS',
                     style: TextStyle(
@@ -180,14 +211,18 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                     ),
                     child: SwitchListTile(
                       activeThumbColor: const Color(0xFFBB0016),
-                      activeTrackColor: const Color(0xFFBB0016).withValues(alpha: 0.3),
+                      activeTrackColor:
+                          const Color(0xFFBB0016).withValues(alpha: 0.3),
                       title: const Text(
                         'Pemberitahuan via Email',
-                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF1F2937)),
+                        style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF1F2937)),
                       ),
                       subtitle: const Text(
-                        'Kirimkan salinan e-tiket peminjaman dan bukti pengembalian ke email',
-                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                        'Kirimkan salinan e-tiket peminjaman dan bukti pengembalian',
+                        style: TextStyle(fontSize: 11.5, color: Colors.grey),
                       ),
                       value: emailNotif,
                       onChanged: (val) {
@@ -197,7 +232,9 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                     ),
                   ),
 
-                  const SizedBox(height: 30),
+                  const SizedBox(height: 24),
+
+                  // Info Box
                   Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
@@ -207,12 +244,16 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                     ),
                     child: const Row(
                       children: [
-                        Icon(Icons.info_outline, color: Color(0xFF1D4ED8), size: 20),
+                        Icon(Icons.info_outline,
+                            color: Color(0xFF1D4ED8), size: 20),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            'Pastikan izin notifikasi di pengaturan perangkat Anda aktif agar pengingat dapat muncul tepat waktu.',
-                            style: TextStyle(color: Color(0xFF1E40AF), fontSize: 11, height: 1.4),
+                            'Pastikan izin notifikasi dan izin lokasi perangkat tetap aktif agar verifikasi penjemputan dan keselamatan armada dapat berjalan optimal.',
+                            style: TextStyle(
+                                color: Color(0xFF1E40AF),
+                                fontSize: 11,
+                                height: 1.45),
                           ),
                         ),
                       ],

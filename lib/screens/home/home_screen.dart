@@ -1,12 +1,19 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../services/gps_service.dart';
+import '../../utils/format_helper.dart';
 import '../history/history_screen.dart';
 import '../booking/booking_screen.dart';
 import '../profile/profile_screen.dart';
 import '../terms/terms_screen.dart';
 import '../return/return_screen.dart';
+import '../login/login_page.dart';
+import '../../services/update_service.dart';
+import '../../widgets/sop_carousel_banner.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -15,7 +22,8 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late PageController _pageController;
   int _currentIndex = 0;
 
@@ -37,9 +45,19 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
 
+  // GPS Enforcement & Monitoring
+  bool _isGpsReady = true;
+  bool _isCheckingGps = false;
+  GpsSecurityStatus _gpsSecurityStatus = GpsSecurityStatus.ready;
+  StreamSubscription<ServiceStatus>? _gpsStatusSubscription;
+  StreamSubscription? _bookingsRealtimeSubscription;
+  Timer? _gpsWatchdogTimer;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     _pageController = PageController(initialPage: _currentIndex);
 
     _pulseController = AnimationController(
@@ -52,14 +70,95 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
 
     _loadSupabaseData();
+    _initGpsMonitoring();
+
+    // Periksa pembaruan aplikasi secara otomatis (silent)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.instance.checkAndPromptUpdate(context, silent: true);
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _gpsStatusSubscription?.cancel();
+    _bookingsRealtimeSubscription?.cancel();
+    _gpsWatchdogTimer?.cancel();
     _pageController.dispose();
     _pulseController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Saat aplikasi dibuka kembali dari background / quick settings, langsung periksa GPS
+    if (state == AppLifecycleState.resumed) {
+      _checkGpsStatus();
+      _fetchActiveBooking();
+    }
+  }
+
+  Future<void> _initGpsMonitoring() async {
+    await _checkGpsStatus();
+
+    try {
+      _gpsStatusSubscription =
+          GpsService.instance.getServiceStatusStream()?.listen((status) {
+        _checkGpsStatus();
+      });
+    } catch (_) {}
+
+    // Berlangganan perubahan status bookings secara realtime agar langsung aktif saat disetujui PIC
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user != null) {
+      try {
+        _bookingsRealtimeSubscription = Supabase.instance.client
+            .from('bookings')
+            .stream(primaryKey: ['id'])
+            .eq('employee_id', user.id)
+            .listen((_) {
+              _fetchActiveBooking();
+            });
+      } catch (_) {}
+    }
+
+    // Watchdog timer setiap 3 detik untuk memastikan GPS selalu terpantau
+    _gpsWatchdogTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _checkGpsStatus();
+    });
+  }
+
+  Future<void> _checkGpsStatus() async {
+    if (_isCheckingGps) return;
+    _isCheckingGps = true;
+
+    try {
+      final status = await GpsService.instance.checkGpsSecurity();
+      final ready = status == GpsSecurityStatus.ready;
+      if (mounted) {
+        if (_isGpsReady != ready || _gpsSecurityStatus != status) {
+          setState(() {
+            _isGpsReady = ready;
+            _gpsSecurityStatus = status;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking GPS security: $e');
+    } finally {
+      _isCheckingGps = false;
+    }
+  }
+
+  Future<void> _handleActivateGps() async {
+    await GpsService.instance.requestPermission();
+    final opened = await GpsService.instance.openLocationSettings();
+    if (!opened) {
+      await GpsService.instance.openAppSettings();
+    }
+    // Verifikasi kembali setelah jeda 1 detik
+    Future.delayed(const Duration(seconds: 1), _checkGpsStatus);
   }
 
   Future<void> _loadSupabaseData() async {
@@ -77,30 +176,59 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
+  // Session & Role Guard: Memvalidasi sesi pengguna secara ketat
   Future<void> _fetchUserData() async {
     final user = Supabase.instance.client.auth.currentUser;
-    if (user != null && mounted) {
-      try {
-        final profile = await Supabase.instance.client
-            .from('profiles')
-            .select()
-            .eq('id', user.id)
-            .maybeSingle();
+    if (user == null) {
+      // Sesi kedaluwarsa atau hilang: redirect aman ke halaman login
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (route) => false,
+        );
+      }
+      return;
+    }
 
-        if (profile != null) {
+    try {
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+
+      if (profile != null) {
+        final role = profile['role'] ?? 'peminjam';
+        if (role == 'admin') {
+          // Akun admin tidak diizinkan masuk ke aplikasi peminjam HP
+          await Supabase.instance.client.auth.signOut();
+          if (mounted) {
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const LoginScreen()),
+              (route) => false,
+            );
+          }
+          return;
+        }
+
+        if (mounted) {
           setState(() {
             userName = profile['full_name'] ?? 'Karyawan Telkom';
             userId = profile['employee_no'] ?? user.email?.split('@').first ?? '-';
             profilePicUrl = profile['avatar_url'] ?? user.userMetadata?['avatar_url'];
           });
-        } else {
+        }
+      } else {
+        if (mounted) {
           setState(() {
             userName = user.userMetadata?['full_name'] ?? 'Karyawan Telkom';
             userId = user.email?.split('@').first ?? '-';
             profilePicUrl = user.userMetadata?['avatar_url'];
           });
         }
-      } catch (e) {
+      }
+    } catch (e) {
+      if (mounted) {
         setState(() {
           userName = user.userMetadata?['full_name'] ?? 'Karyawan Telkom';
           userId = user.email?.split('@').first ?? '-';
@@ -124,6 +252,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
       if (activeRes.isNotEmpty) {
         if (mounted) setState(() => activeBooking = activeRes.first);
+        final bookingId = activeRes.first['id']?.toString();
+        if (bookingId != null && bookingId.isNotEmpty) {
+          GpsService.instance.startPeriodicTracking(bookingId: bookingId);
+        }
         return;
       }
 
@@ -141,8 +273,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       } else {
         if (mounted) setState(() => activeBooking = null);
       }
+      // Status pending atau completed: titik koordinat GPS mati / tidak dikirim
+      GpsService.instance.stopPeriodicTracking();
     } catch (e) {
       if (mounted) setState(() => activeBooking = null);
+      GpsService.instance.stopPeriodicTracking();
     }
   }
 
@@ -179,20 +314,58 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final vId = v['id'];
         final regClean = (v['registration_no'] ?? '').toString().toUpperCase().replaceAll(' ', '');
         
-        final currentBooking = activeMap[vId] ?? activeMap[regClean];
-        final bool isMaintenance = v['active'] == false;
-        final bool isUsed = currentBooking != null && currentBooking['status'] == 'active';
-        final bool isPending = currentBooking != null &&
+        final currentBooking = activeMap[vId] ??
+            activeMap[regClean] ??
+            (activeBooking != null &&
+                    (activeBooking!['vehicle_id'] == vId ||
+                        (activeBooking!['plat_nomor'] ?? '').toString().toUpperCase().replaceAll(' ', '') == regClean)
+                ? activeBooking
+                : null);
+
+        // 1. Baca kolom status dan kolom maintenance dari database
+        final String rawStatus = (v['status'] ?? '').toString().trim().toLowerCase();
+        
+        // Pengecekan kolom maintenance (is_maintenance atau status maintenance/perbaikan)
+        final bool isMaintenanceCol = v['is_maintenance'] == true ||
+            v['maintenance'] == true ||
+            rawStatus == 'maintenance' ||
+            rawStatus == 'perbaikan' ||
+            rawStatus == 'dalam perbaikan' ||
+            rawStatus == 'perawatan' ||
+            rawStatus == 'dalam perawatan' ||
+            rawStatus == 'servis';
+
+        // Pengecekan kolom status (terpakai / in_use / dipakai) atau adanya booking aktif
+        final bool isTerpakaiCol = rawStatus == 'terpakai' ||
+            rawStatus == 'dipakai' ||
+            rawStatus == 'in_use' ||
+            rawStatus == 'used';
+
+        final bool hasActiveBooking = currentBooking != null && currentBooking['status'] == 'active';
+        final bool hasPendingBooking = currentBooking != null &&
             (currentBooking['status'] == 'pending' || currentBooking['status'] == 'pending_admin');
 
-        // Status utama: jika mobil dipakai -> 'Dipakai', jika pending -> 'Menunggu', jika non-aktif -> 'Perawatan', lainnya -> 'Tersedia'
+        // Status Mobil Terpakai: jika kolom status terpakai/in_use ATAU ada peminjaman aktif
+        final bool isUsed = !isMaintenanceCol && (isTerpakaiCol || hasActiveBooking);
+
+        // Status Mobil Pending: jika ada pengajuan peminjaman
+        final bool isPending = !isMaintenanceCol && !isUsed && hasPendingBooking;
+
+        // Status Mobil Dalam Perbaikan/Perawatan: jika kolom maintenance aktif
+        final bool isMaintenance = isMaintenanceCol;
+
+        // Status Tersedia: jika tidak ada status peminjaman, tidak ada maintenance, dan tidak terpakai
+        final bool isAvailable = !isMaintenance && !isUsed && !isPending;
+
         String dynamicStatus = 'Tersedia';
         if (isMaintenance) {
-          dynamicStatus = 'Dalam Perawatan';
+          dynamicStatus = rawStatus.contains('perawatan') ? 'Dalam Perawatan' : 'Dalam Perbaikan';
         } else if (isUsed) {
-          dynamicStatus = 'Dipakai';
+          dynamicStatus = rawStatus == 'terpakai' ? 'Terpakai' : 'Dipakai';
         } else if (isPending) {
           dynamicStatus = 'Menunggu Persetujuan';
+        } else {
+          dynamicStatus = 'Tersedia';
         }
 
         return {
@@ -202,7 +375,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           'is_pending': isPending,
           'is_maintenance': isMaintenance,
           'dynamic_status': dynamicStatus,
-          'is_available': !isUsed && !isPending && !isMaintenance,
+          'is_available': isAvailable,
         };
       }).toList();
 
@@ -218,13 +391,34 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         if (mounted) {
           setState(() {
             allVehicles = List<Map<String, dynamic>>.from(fallback).map((v) {
+              final rawStatus = (v['status'] ?? '').toString().trim().toLowerCase();
+              final isMaint = v['is_maintenance'] == true ||
+                  v['maintenance'] == true ||
+                  rawStatus == 'maintenance' ||
+                  rawStatus == 'perbaikan' ||
+                  rawStatus == 'dalam perbaikan' ||
+                  rawStatus == 'perawatan' ||
+                  rawStatus == 'servis';
+
+              final isUsed = !isMaint && (rawStatus == 'terpakai' || rawStatus == 'dipakai' || rawStatus == 'in_use' || rawStatus == 'used');
+              final isAvail = !isMaint && !isUsed;
+
+              String dynStatus = 'Tersedia';
+              if (isMaint) {
+                dynStatus = rawStatus.contains('perawatan') ? 'Dalam Perawatan' : 'Dalam Perbaikan';
+              } else if (isUsed) {
+                dynStatus = rawStatus == 'terpakai' ? 'Terpakai' : 'Dipakai';
+              } else {
+                dynStatus = 'Tersedia';
+              }
+
               return {
                 ...v,
-                'dynamic_status': v['active'] == true ? 'Tersedia' : 'Dalam Perawatan',
-                'is_available': v['active'] == true,
-                'is_used': false,
+                'dynamic_status': dynStatus,
+                'is_available': isAvail,
+                'is_used': isUsed,
                 'is_pending': false,
-                'is_maintenance': v['active'] == false,
+                'is_maintenance': isMaint,
               };
             }).toList();
           });
@@ -317,6 +511,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   const SizedBox(height: 8),
                   _buildInfoRow(Icons.place_outlined, 'Rencana Tujuan', booking!['destination']),
                 ],
+              ] else if (isUsed) ...[
+                _buildInfoRow(Icons.directions_car_rounded, 'Status Armada', 'Mobil sedang aktif digunakan untuk dinas'),
+              ] else if (car['is_maintenance'] == true) ...[
+                _buildInfoRow(Icons.build_circle_outlined, 'Status Armada', 'Mobil sedang dalam perbaikan / perawatan'),
+                if (car['maintenance_reason'] != null && car['maintenance_reason'].toString().trim().isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _buildInfoRow(Icons.note_alt_outlined, 'Catatan Perbaikan', car['maintenance_reason'].toString().trim()),
+                ],
               ] else ...[
                 _buildInfoRow(Icons.check_circle_outline, 'Kondisi Armada', 'Siap digunakan untuk operasional dinas'),
               ],
@@ -381,7 +583,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 18, color: const Color(0xFF0F3567)),
+        Icon(icon, size: 18, color: const Color(0xFFBA0015)),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -399,20 +601,25 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FB),
-      extendBody: true,
-      body: PageView(
-        controller: _pageController,
-        onPageChanged: _onPageChanged,
-        physics: const BouncingScrollPhysics(),
-        children: [
-          _buildHomeTab(context),
-          const HistoryScreen(),
-          const ProfileScreen(),
-        ],
-      ),
-      bottomNavigationBar: _buildBottomNavigationBar(context),
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: const Color(0xFFF8F9FB),
+          extendBody: true,
+          body: PageView(
+            controller: _pageController,
+            onPageChanged: _onPageChanged,
+            physics: const BouncingScrollPhysics(),
+            children: [
+              _buildHomeTab(context),
+              const HistoryScreen(),
+              const ProfileScreen(),
+            ],
+          ),
+          bottomNavigationBar: _buildBottomNavigationBar(context),
+        ),
+        if (!_isGpsReady) _buildGpsEnforcerOverlay(),
+      ],
     );
   }
 
@@ -440,128 +647,131 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   // 1. HEADER SECTION
   // ==========================================
   Widget _buildHeaderSection(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF0F3567), Color(0xFF8B1229), Color(0xFFBB0016)],
-        ),
-      ),
+    return _AnimatedFleetBackground(
       child: SafeArea(
         bottom: false,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Top Bar: Logo & Avatar
+            // Top Bar: Logo (Kiri), Fleetlok (Tepat di Tengah), & Avatar (Kanan)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 14.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Container(
-                          height: 38,
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-                          ),
-                          child: Image.asset('assets/images/Logo_telkom.png', fit: BoxFit.contain),
+              padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12.0),
+              child: SizedBox(
+                width: double.infinity,
+                height: 38,
+                child: Row(
+                  children: [
+                    // Kiri: Logo Telkom Akses (mentok kiri)
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Image.asset(
+                          'assets/images/Logo_telkom.png',
+                          height: 26,
+                          fit: BoxFit.contain,
                         ),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'FLEET MONITORING',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 0.8,
+                      ),
+                    ),
+                    // Tengah: Tulisan Fleetlok (100% presisi lurus di tengah layar)
+                    const Text(
+                      'Fleetlok',
+                      style: TextStyle(
+                        color: Color(0xFFE50914),
+                        fontSize: 19,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    // Kanan: Profile Avatar (mentok kanan)
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: GestureDetector(
+                          onTap: () => _onBottomNavTapped(2),
+                          child: Container(
+                            padding: const EdgeInsets.all(2),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white.withValues(alpha: 0.6), width: 1.5),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.25),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2),
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              Text(
-                                'Telkom Akses Regional',
-                                style: TextStyle(color: Colors.white70, fontSize: 10),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
+                              ],
+                            ),
+                            child: CircleAvatar(
+                              radius: 17,
+                              backgroundColor: Colors.white24,
+                              backgroundImage: FormatHelper.getImageProvider(profilePicUrl),
+                              child: profilePicUrl == null || profilePicUrl!.isEmpty
+                                  ? const Icon(Icons.person, color: Colors.white, size: 20)
+                                  : null,
+                            ),
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: () => _onBottomNavTapped(2),
-                    child: Container(
-                      padding: const EdgeInsets.all(2),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.5), width: 2),
-                      ),
-                      child: CircleAvatar(
-                        radius: 18,
-                        backgroundColor: Colors.white24,
-                        backgroundImage: profilePicUrl != null && profilePicUrl!.isNotEmpty
-                            ? NetworkImage(profilePicUrl!)
-                            : null,
-                        child: profilePicUrl == null || profilePicUrl!.isEmpty
-                            ? const Icon(Icons.person, color: Colors.white, size: 20)
-                            : null,
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
 
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
 
-            // Greeting User
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20.0),
+            // Greeting User (Centered, rapi & lurus dengan Fleetlok)
+            Center(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Selamat Datang,',
-                    style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.8)),
+                  const Text(
+                    'Welcome',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFFE50914), // Merah Bold
+                      letterSpacing: 0.6,
+                    ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    userName,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.badge_outlined, size: 12, color: Colors.white),
-                            const SizedBox(width: 4),
-                            Text('NIK: $userId', style: const TextStyle(color: Colors.white, fontSize: 11)),
-                          ],
-                        ),
+                  const SizedBox(height: 6),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Text(
+                      FormatHelper.formatUserDisplayName(userName),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 21,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white, // Putih bersih, kontras tinggi & terbaca jelas
+                        letterSpacing: 0.4,
+                        shadows: [
+                          Shadow(
+                            color: Colors.black26,
+                            blurRadius: 4,
+                            offset: Offset(0, 1),
+                          ),
+                        ],
                       ),
-                    ],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.4), width: 1),
+                    ),
+                    child: Text(
+                      'NIK: $userId',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -569,7 +779,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
             const SizedBox(height: 20),
 
-            // Status Card (Active Booking user)
+            // Status Card (Active Booking user / Frosted Glass Box)
             _buildStatusCard(),
 
             const SizedBox(height: 32),
@@ -606,8 +816,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           height: 140,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(20),
+            color: Colors.white.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(24),
           ),
           child: const CircularProgressIndicator(color: Colors.white),
         ),
@@ -627,9 +837,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20.0),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(24),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
             child: Container(
               width: double.infinity,
               padding: const EdgeInsets.all(20),
@@ -637,11 +847,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 color: isPending
                     ? const Color(0xFFF59E0B).withValues(alpha: 0.22)
                     : Colors.white.withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(24),
                 border: Border.all(
                   color: isPending
                       ? const Color(0xFFFDE68A).withValues(alpha: 0.7)
-                      : Colors.white.withValues(alpha: 0.4),
+                      : Colors.white.withValues(alpha: 0.35),
                 ),
               ),
               child: Column(
@@ -714,6 +924,31 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       ),
                     ],
                   ),
+                  if (!isPending) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.directions_car_rounded, size: 14, color: Colors.white),
+                          SizedBox(width: 6),
+                          Text(
+                            'Armada Sedang Digunakan',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 14),
                   if (isPending) ...[
                     Text(
@@ -865,15 +1100,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20.0),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(24),
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.16),
-              borderRadius: BorderRadius.circular(20),
+              color: Colors.white.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(24),
               border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
             ),
             child: Row(
@@ -921,6 +1156,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final int totalCars = allVehicles.length;
     final int availableCars = allVehicles.where((c) => c['is_available'] == true).length;
     final int usedCars = allVehicles.where((c) => c['is_used'] == true || c['is_pending'] == true).length;
+    final int maintenanceCars = allVehicles.where((c) => c['is_maintenance'] == true).length;
 
     // Filter list
     final filteredCars = allVehicles.where((car) {
@@ -936,6 +1172,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         return car['is_available'] == true;
       } else if (_selectedFilter == 'in_use') {
         return car['is_used'] == true || car['is_pending'] == true;
+      } else if (_selectedFilter == 'maintenance') {
+        return car['is_maintenance'] == true;
       }
       return true;
     }).toList();
@@ -951,7 +1189,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         children: [
           const SizedBox(height: 20),
 
-          // 1. STATISTIK RINGKAS ARMADA (METRIC COUNTER)
+          // 1. STATISTIK RINGKAS ARMADA (METRIC COUNTER - TANPA GARIS / BORDERLESS)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20.0),
             child: Row(
@@ -961,8 +1199,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     title: 'Total Armada',
                     count: '$totalCars',
                     icon: Icons.drive_eta_rounded,
-                    color: const Color(0xFF0F3567),
-                    bgColor: const Color(0xFFEFF6FF),
+                    color: const Color(0xFF1E293B),
+                    bgColor: const Color(0xFFF1F5F9),
+                    isSelected: _selectedFilter == 'all',
+                    onTap: () => setState(() => _selectedFilter = 'all'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -973,6 +1213,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     icon: Icons.check_circle_rounded,
                     color: const Color(0xFF16A34A),
                     bgColor: const Color(0xFFF0FDF4),
+                    isSelected: _selectedFilter == 'available',
+                    onTap: () => setState(() => _selectedFilter = 'available'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -983,6 +1225,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     icon: Icons.access_time_filled_rounded,
                     color: const Color(0xFFBA1A1A),
                     bgColor: const Color(0xFFFEF2F2),
+                    isSelected: _selectedFilter == 'in_use',
+                    onTap: () => setState(() => _selectedFilter = 'in_use'),
                   ),
                 ),
               ],
@@ -1026,7 +1270,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     child: _buildQuickActionButton(
                       icon: Icons.qr_code_scanner_rounded,
                       label: 'Loker Kunci',
-                      color: const Color(0xFF0F3567),
+                      color: const Color(0xFFBA0015),
                       onTap: () => _onBottomNavTapped(1),
                     ),
                   ),
@@ -1051,6 +1295,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ],
               ),
             ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // 2.5 BANNER SOP AMAN BERKENDARA (ROTASI OTOMATIS BERGANTI TIAP DETIK)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20.0),
+            child: SopCarouselBanner(),
           ),
 
           const SizedBox(height: 24),
@@ -1084,7 +1336,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       ],
                     ),
                     IconButton(
-                      icon: const Icon(Icons.refresh, size: 20, color: Color(0xFF0F3567)),
+                      icon: const Icon(Icons.refresh, size: 20, color: Color(0xFFBA0015)),
                       onPressed: _loadSupabaseData,
                       tooltip: 'Perbarui Status',
                     ),
@@ -1136,11 +1388,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   physics: const BouncingScrollPhysics(),
                   child: Row(
                     children: [
-                      _buildFilterChip('all', 'Semua Armada ($totalCars)'),
+                      _buildFilterChip('all', 'Semua ($totalCars)'),
                       const SizedBox(width: 8),
                       _buildFilterChip('available', 'Tersedia ($availableCars)'),
                       const SizedBox(width: 8),
                       _buildFilterChip('in_use', 'Dipakai ($usedCars)'),
+                      if (maintenanceCars > 0) ...[
+                        const SizedBox(width: 8),
+                        _buildFilterChip('maintenance', 'Perbaikan ($maintenanceCars)'),
+                      ],
                     ],
                   ),
                 ),
@@ -1191,44 +1447,54 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           // 5. BANNER SOP & KESELAMATAN BERKENDARA
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20.0),
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF0F3567), Color(0xFF1E293B)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+            child: GestureDetector(
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const TermsConditionsScreen()),
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF0A0A0A), Color(0xFF6B0007)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(16),
                 ),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.verified_user_outlined, color: Colors.white, size: 24),
                     ),
-                    child: const Icon(Icons.verified_user_outlined, color: Colors.white, size: 24),
-                  ),
-                  const SizedBox(width: 14),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Patuhi SOP & Safety First',
-                          style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                        SizedBox(height: 2),
-                        Text(
-                          'Periksa kondisi fisik, BBM, dan kembalikan kunci ke loker tepat waktu setelah dinas.',
-                          style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.3),
-                        ),
-                      ],
+                    const SizedBox(width: 14),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Patuhi SOP, GPS & Safety First',
+                            style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            'Wajib GPS akurasi tinggi, larangan Fake GPS, jaga BBM, dan kembalikan tepat waktu.',
+                            style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.3),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 14),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1239,46 +1505,61 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
-  // --- KARTU METRIC RINGKAS ---
+  // --- KARTU METRIC RINGKAS (TANPA GARIS / BORDERLESS) ---
   Widget _buildMetricCard({
     required String title,
     required String count,
     required IconData icon,
     required Color color,
     required Color bgColor,
+    VoidCallback? onTap,
+    bool isSelected = false,
   }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withValues(alpha: 0.2)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Icon(icon, color: color, size: 18),
-              Flexible(
-                child: Text(
-                  count,
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(14),
+          // JANGAN DIGARISIN: Tanpa border line sama sekali
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Icon(icon, color: color, size: 18),
+                Flexible(
+                  child: Text(
+                    count,
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: color,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: color.withValues(alpha: 0.85),
               ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            title,
-            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.8)),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1376,7 +1657,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               ? const Color(0xFFFCA5A5).withValues(alpha: 0.6)
               : isPending
                   ? const Color(0xFFFDE68A)
-                  : Colors.grey.shade200,
+                  : car['is_maintenance'] == true
+                      ? const Color(0xFFFDBA74)
+                      : Colors.grey.shade200,
         ),
         boxShadow: [
           BoxShadow(
@@ -1416,23 +1699,31 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       ? const Color(0xFFF0FDF4)
                       : isUsed
                           ? const Color(0xFFFEF2F2)
-                          : const Color(0xFFFFFBEB),
+                          : isPending
+                              ? const Color(0xFFFFFBEB)
+                              : const Color(0xFFFFF7ED),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
                     color: isAvailable
                         ? const Color(0xFFBBF7D0)
                         : isUsed
                             ? const Color(0xFFFECACA)
-                            : const Color(0xFFFDE68A),
+                            : isPending
+                                ? const Color(0xFFFDE68A)
+                                : const Color(0xFFFED7AA),
                   ),
                 ),
                 child: Icon(
-                  Icons.directions_car_filled,
+                  car['is_maintenance'] == true
+                      ? Icons.build_circle_rounded
+                      : Icons.directions_car_filled,
                   color: isAvailable
                       ? const Color(0xFF16A34A)
                       : isUsed
                           ? const Color(0xFFBA1A1A)
-                          : const Color(0xFFD97706),
+                          : isPending
+                              ? const Color(0xFFD97706)
+                              : const Color(0xFFEA580C),
                   size: 32,
                 ),
               ),
@@ -1547,9 +1838,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       fg = const Color(0xFF92400E);
       dotColor = const Color(0xFFD97706);
     } else {
-      bg = Colors.grey.shade100;
-      fg = Colors.grey.shade700;
-      dotColor = Colors.grey.shade500;
+      // Perawatan / Perbaikan
+      bg = const Color(0xFFFFF7ED);
+      fg = const Color(0xFFC2410C);
+      dotColor = const Color(0xFFEA580C);
     }
 
     return Container(
@@ -1634,6 +1926,695 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ],
         ),
       ),
+    );
+  }
+
+  // ==========================================
+  // GPS ENFORCER OVERLAY (STRICT LOCK, FAKE GPS & DASHBOARD)
+  // ==========================================
+  Widget _buildGpsEnforcerOverlay() {
+    final bool isMock = _gpsSecurityStatus == GpsSecurityStatus.mockDetected;
+    final bool hasActiveLoan =
+        activeBooking != null && activeBooking!['status'] == 'active';
+
+    return PopScope(
+      canPop: false,
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.90),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+          child: SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
+                child: isMock
+                    ? _buildMockLocationSecurityLockContent()
+                    : (hasActiveLoan
+                        ? _buildActiveLoanStrictLockContent()
+                        : _buildDashboardGpsRequiredContent()),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Tampilan Penguncian Keamanan: Fake GPS / Mock Location Terdeteksi
+  Widget _buildMockLocationSecurityLockContent() {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 440),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E0B12),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color(0xFFFF2E54),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFFF2E54).withValues(alpha: 0.35),
+            blurRadius: 36,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ScaleTransition(
+            scale: _pulseAnimation,
+            child: Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const RadialGradient(
+                  colors: [Color(0xFFFF2E54), Color(0xFF880016)],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFFF2E54).withValues(alpha: 0.6),
+                    blurRadius: 24,
+                    spreadRadius: 4,
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.gpp_bad_rounded,
+                size: 44,
+                color: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFF2E54).withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFFF2E54).withValues(alpha: 0.6)),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.warning_amber_rounded, size: 14, color: Color(0xFFFFA0B2)),
+                SizedBox(width: 6),
+                Text(
+                  'SECURITY LOCKOUT â€¢ FAKE GPS DETECTED',
+                  style: TextStyle(
+                    color: Color(0xFFFFA0B2),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          const Text(
+            'LOKASI PALSU TERDETEKSI!',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 21,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          Text(
+            'Sistem mendeteksi aplikasi Fake GPS atau Mock Location provider aktif di HP Anda. Demi kepatuhan audit dan keamanan armada kantor, manipulasi lokasi dilarang keras.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.88),
+              fontSize: 12.5,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Langkah Penyelesaian:',
+                  style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '1. Matikan atau uninstal aplikasi Fake GPS / FlyGPS.\n'
+                  '2. Nonaktifkan "Pilih aplikasi lokasi tiruan" di Opsi Pengembang (Developer Options).\n'
+                  '3. Tekan tombol segarkan di bawah untuk verifikasi ulang.',
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 11.5, height: 1.45),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: () async {
+                await GpsService.instance.openAppSettings();
+                _checkGpsStatus();
+              },
+              icon: const Icon(Icons.settings_rounded, color: Colors.white),
+              label: const Text(
+                'BUKA PENGATURAN PERANGKAT',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFBB0016),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                elevation: 4,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          SizedBox(
+            width: double.infinity,
+            height: 42,
+            child: OutlinedButton.icon(
+              onPressed: _checkGpsStatus,
+              icon: const Icon(Icons.refresh_rounded, size: 18, color: Colors.white70),
+              label: const Text(
+                'Saya Sudah Mematikan Fake GPS',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Colors.white.withValues(alpha: 0.25)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Tampilan Penguncian Ketat Peminjaman Aktif (GPS Dilarang Dimatikan)
+  Widget _buildActiveLoanStrictLockContent() {
+    final vehicle = activeBooking!['vehicles'] ?? {};
+    final carName = vehicle['make_model'] ?? 'Mobil Dinas Telkom';
+    final plateNumber =
+        vehicle['registration_no'] ?? activeBooking!['plat_nomor'] ?? '-';
+    final destination = activeBooking!['destination'] ?? '-';
+    final startAt = activeBooking!['start_at'] ?? '';
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 440),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF19070A),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color(0xFFEF4444).withValues(alpha: 0.7),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFBB0016).withValues(alpha: 0.4),
+            blurRadius: 32,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Icon Peringatan Berdenyut
+          ScaleTransition(
+            scale: _pulseAnimation,
+            child: Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const RadialGradient(
+                  colors: [Color(0xFFEF4444), Color(0xFF7F1D1D)],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFEF4444).withValues(alpha: 0.5),
+                    blurRadius: 20,
+                    spreadRadius: 4,
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.location_off_rounded,
+                size: 42,
+                color: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          // Label Status Darurat
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEF4444).withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: const Color(0xFFEF4444).withValues(alpha: 0.5),
+              ),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.shield_rounded, size: 14, color: Color(0xFFFCA5A5)),
+                SizedBox(width: 6),
+                Text(
+                  'KUNCI LOKASI OPERASIONAL AKTIF',
+                  style: TextStyle(
+                    color: Color(0xFFFCA5A5),
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          const Text(
+            'GPS WAJIB DIAKTIFKAN!',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          Text(
+            'Peminjaman mobil dinas Anda saat ini berstatus SEDANG BERJALAN di sistem. Lokasi GPS pada perangkat TIDAK DAPAT DIMATIKAN.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.85),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          // Kartu Informasi Kendaraan yang Sedang Dipinjam
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        carName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    _buildIndonesianPlateBadge(plateNumber),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.place_outlined, size: 14, color: Colors.white60),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Tujuan: $destination',
+                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.access_time_rounded, size: 14, color: Colors.white60),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Mulai: ${_formatBookingDate(startAt)}',
+                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // Kotak Informasi SOP
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFEF2F2).withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: const Color(0xFFEF4444).withValues(alpha: 0.3),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.info_outline_rounded,
+                    size: 18, color: Color(0xFFF87171)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Sesuai ketentuan monitoring Telkom Akses, lokasi HP wajib tetap menyala sampai status peminjaman di Supabase diselesaikan ("Completed").',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.8),
+                      fontSize: 11.5,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+
+          // Tombol Utama: Aktifkan GPS Sekarang
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: _handleActivateGps,
+              icon: const Icon(Icons.location_on_rounded, color: Colors.white),
+              label: const Text(
+                'AKTIFKAN GPS SEKARANG',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFBB0016),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                elevation: 4,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          // Tombol Sinkronisasi Status Supabase
+          SizedBox(
+            width: double.infinity,
+            height: 42,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await _loadSupabaseData();
+                await _checkGpsStatus();
+              },
+              icon: const Icon(Icons.sync_rounded, size: 18, color: Colors.white70),
+              label: const Text(
+                'Sudah Dikembalikan? Periksa Supabase',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Colors.white.withValues(alpha: 0.25)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+
+          // Tombol Cek Ulang GPS
+          TextButton(
+            onPressed: _checkGpsStatus,
+            child: const Text(
+              'Sudah menyalakan GPS? Ketuk di sini untuk segarkan',
+              style: TextStyle(
+                color: Color(0xFFFCA5A5),
+                fontSize: 11.5,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Tampilan Wajib GPS Saat Masuk Dashboard (Tanpa Peminjaman Aktif)
+  Widget _buildDashboardGpsRequiredContent() {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 420),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D1B2A),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color(0xFF38BDF8).withValues(alpha: 0.4),
+          width: 1.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F3567).withValues(alpha: 0.45),
+            blurRadius: 28,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Icon Lokasi
+          Container(
+            width: 76,
+            height: 76,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: const LinearGradient(
+                colors: [Color(0xFF0284C7), Color(0xFF0F3567)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF0284C7).withValues(alpha: 0.4),
+                  blurRadius: 18,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: const Icon(
+              Icons.near_me_disabled_rounded,
+              size: 38,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0284C7).withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: const Color(0xFF38BDF8).withValues(alpha: 0.5),
+              ),
+            ),
+            child: const Text(
+              'TELKOM AKSES REGIONAL',
+              style: TextStyle(
+                color: Color(0xFF7DD3FC),
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.8,
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          const Text(
+            'Aktivasi GPS Diperlukan',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 21,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          Text(
+            'Untuk menggunakan aplikasi peminjaman mobil dinas dan mengakses seluruh fitur dashboard, Anda wajib mengaktifkan layanan lokasi (GPS) pada HP Anda.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.8),
+              fontSize: 13,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 22),
+
+          // Tombol Aktifkan GPS
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: _handleActivateGps,
+              icon: const Icon(Icons.my_location_rounded, color: Colors.white),
+              label: const Text(
+                'AKTIFKAN GPS SEKARANG',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13.5,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFBB0016),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                elevation: 3,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          // Tombol Cek Ulang
+          SizedBox(
+            width: double.infinity,
+            height: 42,
+            child: OutlinedButton.icon(
+              onPressed: _checkGpsStatus,
+              icon: const Icon(Icons.refresh_rounded,
+                  size: 18, color: Colors.white70),
+              label: const Text(
+                'Saya Sudah Mengaktifkan GPS',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Colors.white.withValues(alpha: 0.25)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  
+}
+
+/// Background gradien dinamis hitam pekat ke merah sesuai permintaan & foto referensi
+/// (Hitam #0A0A0A di atas, Deep Crimson #6B0007 di tengah, Merah #BA0015 di bawah).
+class _AnimatedFleetBackground extends StatefulWidget {
+  final Widget child;
+  const _AnimatedFleetBackground({required this.child});
+
+  @override
+  State<_AnimatedFleetBackground> createState() => _AnimatedFleetBackgroundState();
+}
+
+class _AnimatedFleetBackgroundState extends State<_AnimatedFleetBackground>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    )..repeat(reverse: true);
+    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        final t = _animation.value;
+        // Animasi halus pergeseran gradien hitam pekat ke merah
+        return Container(
+          width: double.infinity,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(-0.15 * t, -1.0),
+              end: Alignment(0.15 * t, 1.0),
+              colors: const [
+                Color(0xFF0A0A0A), // HITAM PEKAT
+                Color(0xFF6B0007), // DEEP CRIMSON
+                Color(0xFFBA0015), // MERAH TELKOM
+              ],
+              stops: const [0.0, 0.42, 1.0],
+            ),
+          ),
+          child: child,
+        );
+      },
+      child: widget.child,
     );
   }
 }

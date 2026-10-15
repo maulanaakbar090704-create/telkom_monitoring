@@ -71,18 +71,26 @@ class _PersonalInfoScreenState extends State<PersonalInfoScreen> {
 
     try {
       // Menyimpan data ke tabel profiles
-      await Supabase.instance.client.from('profiles').upsert({
-        'id': user.id,
-        'full_name': _nameController.text.trim(),
-        'employee_no': _nikController.text.trim(),
-        'position': _deptController.text.trim(),
-      });
+      try {
+        await Supabase.instance.client.from('profiles').update({
+          'full_name': _nameController.text.trim(),
+          'employee_no': _nikController.text.trim(),
+          'position': _deptController.text.trim(),
+        }).eq('id', user.id);
+      } catch (_) {
+        await Supabase.instance.client.from('profiles').upsert({
+          'id': user.id,
+          'full_name': _nameController.text.trim(),
+          'employee_no': _nikController.text.trim(),
+          'position': _deptController.text.trim(),
+        });
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Informasi berhasil disimpan!'), backgroundColor: Colors.green),
         );
-        Navigator.pop(context); // Kembali ke halaman profil
+        Navigator.pop(context, true); // Kembali ke halaman profil dan memicu refresh
       }
     } catch (e) {
       if (mounted) {
@@ -102,7 +110,7 @@ class _PersonalInfoScreenState extends State<PersonalInfoScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0F3567),
+        backgroundColor: const Color(0xFF0A0A0A),
         title: const Text('Informasi Personal', style: TextStyle(color: Colors.white, fontSize: 16)),
         leading: IconButton(
   icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 18), 
@@ -159,7 +167,7 @@ class _PersonalInfoScreenState extends State<PersonalInfoScreen> {
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade300)),
             enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade300)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF0F3567))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFBA0015))),
           ),
         ),
       ],
